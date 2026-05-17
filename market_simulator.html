@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Macro-to-Micro Market Crash Risk Simulator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f172a; color: #f8fafc; }
+        .gauge-container { position: relative; width: 300px; height: 150px; overflow: hidden; margin: 0 auto; }
+        .gauge-background { position: absolute; width: 300px; height: 300px; border-radius: 50%; border: 30px solid #334155; border-bottom-color: transparent; border-left-color: transparent; transform: rotate(135deg); box-sizing: border-box; }
+        .gauge-fill { position: absolute; width: 300px; height: 300px; border-radius: 50%; border: 30px solid transparent; box-sizing: border-box; transition: transform 0.5s ease-out; }
+        .gauge-needle { position: absolute; bottom: 0; left: 50%; width: 4px; height: 120px; background-color: #fff; transform-origin: bottom center; transition: transform 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55); z-index: 10; border-radius: 4px 4px 0 0; }
+        .gauge-needle::after { content: ''; position: absolute; bottom: -8px; left: -6px; width: 16px; height: 16px; background-color: #fff; border-radius: 50%; }
+        .gauge-center-text { position: absolute; bottom: 20px; width: 100%; text-align: center; font-size: 2rem; font-weight: bold; }
+    </style>
+</head>
+<body class="p-6">
+    <div class="max-w-4xl mx-auto bg-slate-800 rounded-xl shadow-2xl p-8 border border-slate-700">
+        <h1 class="text-3xl font-bold text-center text-blue-400 mb-2">⚡ Macro-to-Micro Risk Simulator</h1>
+        <p class="text-center text-slate-400 mb-8 text-sm">ประเมินความเสี่ยงตลาดแครช (Crash) หรือ จุดกลับตัว (Reversal) จากสัญญาณจริง</p>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
+            <div class="space-y-6">
+                <div class="bg-slate-700 p-5 rounded-lg">
+                    <div class="flex justify-between mb-1">
+                        <label class="font-semibold text-slate-200">VIX Index (ความกลัว)</label>
+                        <span id="vixVal" class="text-yellow-400 font-bold">13</span>
+                    </div>
+                    <input type="range" id="vixSlider" min="10" max="80" value="13" class="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer">
+                    <p class="text-xs text-slate-400 mt-1">10-18: ชะล่าใจ | 18-35: ปรับฐาน | >45: Panic/กลับตัว</p>
+                </div>
+
+                <div class="bg-slate-700 p-5 rounded-lg">
+                    <div class="flex justify-between mb-1">
+                        <label class="font-semibold text-slate-200">US 10Y Yield (%)</label>
+                        <span id="yieldVal" class="text-purple-400 font-bold">4.5</span>
+                    </div>
+                    <input type="range" id="yieldSlider" min="3.0" max="6.0" step="0.1" value="4.5" class="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer">
+                    <p class="text-xs text-slate-400 mt-1">> 4.5%: กดดันหุ้น Growth อย่างหนัก</p>
+                </div>
+
+                <div class="bg-slate-700 p-5 rounded-lg">
+                    <div class="flex justify-between mb-1">
+                        <label class="font-semibold text-slate-200">Buffett Indicator (%)</label>
+                        <span id="buffettVal" class="text-green-400 font-bold">180</span>
+                    </div>
+                    <input type="range" id="buffettSlider" min="100" max="220" step="5" value="180" class="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer">
+                    <p class="text-xs text-slate-400 mt-1">> 160%: Valuation ตลาดแพงระดับฟองสบู่</p>
+                </div>
+
+                <div class="bg-slate-700 p-5 rounded-lg">
+                    <label class="font-semibold text-slate-200 block mb-2">Net Dealer Gamma (Options Flow)</label>
+                    <select id="gammaSelect" class="w-full bg-slate-800 text-white border border-slate-600 rounded p-2 focus:outline-none focus:border-blue-500">
+                        <option value="strong_pos">Strong Positive (ตลาดถูกดันขึ้นแรง)</option>
+                        <option value="pos" selected>Positive Pinning (ตลาดแกว่งแคบ ปลอดภัย)</option>
+                        <option value="zero">Zero / Transition (จุดเปราะบาง เปลี่ยนเทรนด์)</option>
+                        <option value="neg">Negative (ผันผวนรุนแรง พร้อมลงลิฟต์)</option>
+                    </select>
+                </div>
+
+                <div class="bg-slate-700 p-5 rounded-lg">
+                    <div class="flex justify-between mb-1">
+                        <label class="font-semibold text-slate-200">Days to OPEX (วันหมดอายุสัญญา)</label>
+                        <span id="opexVal" class="text-orange-400 font-bold">15</span>
+                    </div>
+                    <input type="range" id="opexSlider" min="0" max="30" value="15" class="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer">
+                    <p class="text-xs text-slate-400 mt-1">< 5 วัน: ความผันผวนจะพุ่งสูงหลังปลดล็อก Gamma</p>
+                </div>
+            </div>
+
+            <div class="flex flex-col items-center justify-start pt-4">
+                <h2 class="text-xl font-bold text-slate-300 mb-6">Crash / Reversal Risk Score</h2>
+                
+                <div class="gauge-container mb-6">
+                    <div class="gauge-background"></div>
+                    <div id="gaugeFill" class="gauge-fill" style="border-bottom-color: transparent; border-left-color: transparent;"></div>
+                    <div id="gaugeNeedle" class="gauge-needle"></div>
+                    <div class="gauge-center-text" id="scoreText">0%</div>
+                </div>
+
+                <div id="statusBox" class="w-full p-6 rounded-lg border-2 mt-4 text-center transition-colors duration-300">
+                    <h3 id="statusTitle" class="text-lg font-bold mb-2">สถานะตลาด</h3>
+                    <p id="statusDesc" class="text-sm">กำลังคำนวณ...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Elements
+        const vixSlider = document.getElementById('vixSlider');
+        const yieldSlider = document.getElementById('yieldSlider');
+        const buffettSlider = document.getElementById('buffettSlider');
+        const gammaSelect = document.getElementById('gammaSelect');
+        const opexSlider = document.getElementById('opexSlider');
+
+        const vixVal = document.getElementById('vixVal');
+        const yieldVal = document.getElementById('yieldVal');
+        const buffettVal = document.getElementById('buffettVal');
+        const opexVal = document.getElementById('opexVal');
+
+        const gaugeFill = document.getElementById('gaugeFill');
+        const gaugeNeedle = document.getElementById('gaugeNeedle');
+        const scoreText = document.getElementById('scoreText');
+        const statusBox = document.getElementById('statusBox');
+        const statusTitle = document.getElementById('statusTitle');
+        const statusDesc = document.getElementById('statusDesc');
+
+        function calculateRisk() {
+            // Update labels
+            const vix = parseInt(vixSlider.value);
+            const yld = parseFloat(yieldSlider.value);
+            const buffett = parseInt(buffettSlider.value);
+            const gamma = gammaSelect.value;
+            const opex = parseInt(opexSlider.value);
+
+            vixVal.innerText = vix;
+            yieldVal.innerText = yld.toFixed(1);
+            buffettVal.innerText = buffett;
+            opexVal.innerText = opex;
+
+            let score = 0;
+            let gaugeColor = '';
+            let title = '';
+            let desc = '';
+            let boxClass = '';
+
+            // 1. Calculate Base Macro Risk
+            if (yld > 4.5) score += 20;
+            else if (yld > 4.0) score += 10;
+
+            if (buffett > 180) score += 20;
+            else if (buffett > 150) score += 10;
+
+            // 2. Micro & Flow Multipliers (The Triggers)
+            if (gamma === 'neg') score += 40;
+            else if (gamma === 'zero') score += 25;
+            else if (gamma === 'pos') score -= 10; // Pinning protects the market
+
+            if (opex <= 5 && gamma !== 'pos') score += 15; // OPEX weakness
+
+            // 3. VIX Override Logic
+            if (vix > 45) {
+                // PANIC / REVERSAL ZONE (VIX Extreme High)
+                score = 10; // Risk of holding short is high, good time to buy
+                gaugeColor = '#3b82f6'; // Blue
+                title = '🔵 Panic Reversal (จุดกลับตัว / Buy the Blood)';
+                desc = 'ความกลัวขึ้นถึงขีดสุด (VIX Extreme)! รายย่อยยอมแพ้หมดแล้ว นี่คือโอกาสทองในการหาจังหวะสวนซื้อ (Buy the Dip) ตลาดมักจะ Bottom ตรงนี้';
+                boxClass = 'bg-blue-900 border-blue-500 text-blue-100';
+            } else if (vix >= 18 && vix <= 35) {
+                // ACTIVE CORRECTION
+                score += (vix - 18) * 2; 
+            } else if (vix < 15 && score > 50) {
+                 // HIDDEN CRASH RISK (Complacency)
+                 score += 15; // Add hidden risk
+            }
+
+            // Cap score
+            score = Math.max(0, Math.min(100, score));
+
+            // Set visuals based on score (if not overriden by Extreme VIX)
+            if (vix <= 45) {
+                if (score < 40) {
+                    gaugeColor = '#22c55e'; // Green
+                    title = '🟢 Safe / Gamma Pinning (ทรงตัว / สะสมพลัง)';
+                    desc = 'Valuation ยังรับได้และ Dealer Gamma คอยพยุงตลาดไว้ (Pin) ตลาดแกว่งตัวแคบ สามารถถือหุ้นรันเทรนด์ (Hold) ต่อไปได้';
+                    boxClass = 'bg-green-900 border-green-500 text-green-100';
+                } else if (score < 75) {
+                    gaugeColor = '#eab308'; // Yellow
+                    title = '🟡 Caution (เริ่มเปราะบาง / เฝ้าระวัง)';
+                    desc = 'Macro เริ่มตึงตัว หรือ Gamma เริ่มเข้าใกล้ศูนย์ แนะนำให้หยุดไล่ซื้อ และพิจารณาจัดสรรเงินสด หรือทำ Hedging บางส่วน';
+                    boxClass = 'bg-yellow-900 border-yellow-500 text-yellow-100';
+                } else {
+                    gaugeColor = '#ef4444'; // Red
+                    title = '🔴 Extreme Crash Risk (อันตราย / พร้อมลงลิฟต์)';
+                    desc = `คำเตือน! สัญญาณอันตรายครบ: Valuation แพง + Yield สูง + Negative Gamma และใกล้ OPEX ความผันผวนจะรุนแรง แนะนำลดพอร์ตหรือถือเงินสดทันที`;
+                    boxClass = 'bg-red-900 border-red-500 text-red-100';
+                }
+            }
+
+            // Update UI
+            scoreText.innerText = `${Math.round(score)}%`;
+            scoreText.style.color = gaugeColor;
+            
+            // Gauge math: 0% = -90deg, 100% = 90deg rotation on needle
+            const degrees = (score / 100) * 180 - 90;
+            gaugeNeedle.style.transform = `rotate(${degrees}deg)`;
+            
+            // Fill rotation
+            gaugeFill.style.borderTopColor = gaugeColor;
+            gaugeFill.style.borderRightColor = gaugeColor;
+            const fillRotation = (score / 100) * 180 - 45; // Start offset
+            gaugeFill.style.transform = `rotate(${fillRotation}deg)`;
+
+            statusTitle.innerText = title;
+            statusDesc.innerText = desc;
+            statusBox.className = `w-full p-6 rounded-lg border-2 mt-4 text-center transition-colors duration-300 ${boxClass}`;
+        }
+
+        // Add Listeners
+        [vixSlider, yieldSlider, buffettSlider, gammaSelect, opexSlider].forEach(el => {
+            el.addEventListener('input', calculateRisk);
+        });
+
+        // Init
+        calculateRisk();
+    </script>
+</body>
+</html>

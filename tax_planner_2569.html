@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tax Planning Allocator 2569</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; }
+    </style>
+</head>
+<body class="p-6">
+    <div class="max-w-5xl mx-auto bg-white rounded-xl shadow-lg p-8">
+        <h1 class="text-3xl font-bold text-center text-blue-800 mb-8">📊 เครื่องมือวางแผนจัดพอร์ตลงทุน RMF และ Thai ESG (ปี 2569)</h1>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div class="space-y-6">
+                <div class="bg-blue-50 p-6 rounded-lg border border-blue-100">
+                    <h2 class="text-xl font-bold text-blue-700 mb-4">1. ตั้งเป้าหมายการลงทุน (บาท)</h2>
+                    
+                    <div class="mb-4">
+                        <label class="block text-sm font-semibold text-gray-700 mb-1">เป้าหมาย RMF รวม</label>
+                        <input type="number" id="rmfTotal" value="270000" class="w-full p-2 border rounded focus:ring-2 focus:ring-blue-400">
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-semibold text-gray-700 mb-1">ซื้อ RMF ไปแล้ว (ทองคำ)</label>
+                        <input type="number" id="rmfBought" value="50000" class="w-full p-2 border rounded focus:ring-2 focus:ring-blue-400">
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-semibold text-gray-700 mb-1">เป้าหมาย Thai ESG รวม</label>
+                        <input type="number" id="esgTotal" value="300000" class="w-full p-2 border rounded focus:ring-2 focus:ring-blue-400">
+                    </div>
+                    
+                    <div class="mt-4 p-3 bg-white rounded shadow-inner text-sm">
+                        <p class="font-bold text-gray-700">ยอด RMF คงเหลือที่ต้องซื้อ: <span id="rmfRemainingText" class="text-blue-600 text-lg">220,000</span> บาท</p>
+                    </div>
+                </div>
+
+                <div class="bg-green-50 p-6 rounded-lg border border-green-100">
+                    <h2 class="text-xl font-bold text-green-700 mb-4">2. ปรับสัดส่วนพอร์ต (Asset Allocation)</h2>
+                    
+                    <div class="mb-6">
+                        <label class="block text-sm font-semibold text-gray-700 mb-2">สัดส่วน RMF ที่เหลือ (Global Equity)</label>
+                        <div class="flex justify-between text-xs text-gray-600 mb-1">
+                            <span>SCBRMS&P500 (<span id="sp500Val">50</span>%)</span>
+                            <span>KFGBRANRMF (<span id="brandVal">50</span>%)</span>
+                        </div>
+                        <input type="range" id="rmfSlider" min="0" max="100" value="50" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-700 mb-2">สัดส่วน Thai ESG</label>
+                        <div class="flex justify-between text-xs text-gray-600 mb-1">
+                            <span>ตราสารหนี้ ESG (<span id="fixedVal">70</span>%)</span>
+                            <span>หุ้นปันผล ESG (<span id="divVal">30</span>%)</span>
+                        </div>
+                        <input type="range" id="esgSlider" min="0" max="100" value="70" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white p-6 rounded-lg border border-gray-200 shadow-sm flex flex-col items-center justify-center">
+                <h2 class="text-xl font-bold text-gray-800 mb-4">สัดส่วนพอร์ตภาพรวม (Overall Portfolio)</h2>
+                <div class="w-full max-w-sm">
+                    <canvas id="allocationChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-8 bg-gray-50 p-6 rounded-lg border border-gray-200">
+            <h2 class="text-xl font-bold text-gray-800 mb-4">📅 แผนการทยอยซื้อ (DCA) พฤษภาคม - ธันวาคม 2569 (หาร 8 เดือน)</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm text-left text-gray-700 border-collapse">
+                    <thead class="text-xs text-gray-700 uppercase bg-gray-200">
+                        <tr>
+                            <th class="px-4 py-3 border border-gray-300">กองทุน</th>
+                            <th class="px-4 py-3 border border-gray-300 text-right">ยอดรวมที่ต้องซื้อ (บาท)</th>
+                            <th class="px-4 py-3 border border-gray-300 text-right text-blue-700">DCA ต่อเดือน (บาท)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="bg-white border-b hover:bg-gray-100">
+                            <td class="px-4 py-3 font-medium border border-gray-300">🇺🇸 SCBRMS&P500 (RMF)</td>
+                            <td class="px-4 py-3 text-right border border-gray-300" id="t-sp500-total">0</td>
+                            <td class="px-4 py-3 text-right font-bold text-blue-600 border border-gray-300" id="t-sp500-dca">0</td>
+                        </tr>
+                        <tr class="bg-gray-50 border-b hover:bg-gray-100">
+                            <td class="px-4 py-3 font-medium border border-gray-300">🌍 KFGBRANRMF (RMF)</td>
+                            <td class="px-4 py-3 text-right border border-gray-300" id="t-brand-total">0</td>
+                            <td class="px-4 py-3 text-right font-bold text-blue-600 border border-gray-300" id="t-brand-dca">0</td>
+                        </tr>
+                        <tr class="bg-white border-b hover:bg-gray-100">
+                            <td class="px-4 py-3 font-medium border border-gray-300">🛡️ ตราสารหนี้ ESG</td>
+                            <td class="px-4 py-3 text-right border border-gray-300" id="t-fixed-total">0</td>
+                            <td class="px-4 py-3 text-right font-bold text-green-600 border border-gray-300" id="t-fixed-dca">0</td>
+                        </tr>
+                        <tr class="bg-gray-50 border-b hover:bg-gray-100">
+                            <td class="px-4 py-3 font-medium border border-gray-300">📈 หุ้นปันผล ESG</td>
+                            <td class="px-4 py-3 text-right border border-gray-300" id="t-div-total">0</td>
+                            <td class="px-4 py-3 text-right font-bold text-green-600 border border-gray-300" id="t-div-dca">0</td>
+                        </tr>
+                        <tr class="bg-blue-100 font-bold">
+                            <td class="px-4 py-3 border border-gray-300">รวมกระแสเงินสดที่ต้องใช้</td>
+                            <td class="px-4 py-3 text-right border border-gray-300" id="t-all-total">0</td>
+                            <td class="px-4 py-3 text-right text-red-600 text-lg border border-gray-300" id="t-all-dca">0</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="text-xs text-gray-500 mt-2">* ยอด DCA คิดจากการนำเงินคงเหลือเป้าหมายหารด้วย 8 เดือน (พ.ค. - ธ.ค.)</p>
+        </div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const iRmfTotal = document.getElementById('rmfTotal');
+        const iRmfBought = document.getElementById('rmfBought');
+        const iEsgTotal = document.getElementById('esgTotal');
+        const sRmfSlider = document.getElementById('rmfSlider');
+        const sEsgSlider = document.getElementById('esgSlider');
+        
+        // Labels
+        const lRmfRemaining = document.getElementById('rmfRemainingText');
+        const lSp500 = document.getElementById('sp500Val');
+        const lBrand = document.getElementById('brandVal');
+        const lFixed = document.getElementById('fixedVal');
+        const lDiv = document.getElementById('divVal');
+
+        // Chart setup
+        const ctx = document.getElementById('allocationChart').getContext('2d');
+        let allocChart = new Chart(ctx, {
+            type: 'pie',
+            data: {
+                labels: ['Global Equity (RMF)', 'Thai Equity (ESG)', 'Fixed Income (ESG)', 'Gold (RMF)'],
+                datasets: [{
+                    data: [0, 0, 0, 0],
+                    backgroundColor: ['#3b82f6', '#10b981', '#6b7280', '#fbbf24'],
+                    borderWidth: 1
+                }]
+            },
+            options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+        });
+
+        const formatMoney = (num) => new Intl.NumberFormat('th-TH').format(Math.round(num));
+
+        function calculate() {
+            // Get values
+            const rmfGoal = Number(iRmfTotal.value) || 0;
+            const rmfBought = Number(iRmfBought.value) || 0;
+            const esgGoal = Number(iEsgTotal.value) || 0;
+            
+            const rmfRemaining = Math.max(0, rmfGoal - rmfBought);
+            lRmfRemaining.innerText = formatMoney(rmfRemaining);
+
+            const rmfP1 = Number(sRmfSlider.value);
+            const rmfP2 = 100 - rmfP1;
+            lSp500.innerText = rmfP1;
+            lBrand.innerText = rmfP2;
+
+            const esgP1 = Number(sEsgSlider.value);
+            const esgP2 = 100 - esgP1;
+            lFixed.innerText = esgP1;
+            lDiv.innerText = esgP2;
+
+            // Calc Funds
+            const vSp500 = rmfRemaining * (rmfP1 / 100);
+            const vBrand = rmfRemaining * (rmfP2 / 100);
+            const vFixed = esgGoal * (esgP1 / 100);
+            const vDiv = esgGoal * (esgP2 / 100);
+
+            // Update Chart
+            const globalEq = vSp500 + vBrand;
+            allocChart.data.datasets[0].data = [globalEq, vDiv, vFixed, rmfBought];
+            allocChart.update();
+
+            // Update Table
+            document.getElementById('t-sp500-total').innerText = formatMoney(vSp500);
+            document.getElementById('t-sp500-dca').innerText = formatMoney(vSp500 / 8);
+            
+            document.getElementById('t-brand-total').innerText = formatMoney(vBrand);
+            document.getElementById('t-brand-dca').innerText = formatMoney(vBrand / 8);
+
+            document.getElementById('t-fixed-total').innerText = formatMoney(vFixed);
+            document.getElementById('t-fixed-dca').innerText = formatMoney(vFixed / 8);
+
+            document.getElementById('t-div-total').innerText = formatMoney(vDiv);
+            document.getElementById('t-div-dca').innerText = formatMoney(vDiv / 8);
+
+            const totalFunds = vSp500 + vBrand + vFixed + vDiv;
+            document.getElementById('t-all-total').innerText = formatMoney(totalFunds);
+            document.getElementById('t-all-dca').innerText = formatMoney(totalFunds / 8);
+        }
+
+        // Event Listeners
+        [iRmfTotal, iRmfBought, iEsgTotal, sRmfSlider, sEsgSlider].forEach(el => {
+            el.addEventListener('input', calculate);
+        });
+
+        // Initial render
+        calculate();
+    </script>
+</body>
+</html>
