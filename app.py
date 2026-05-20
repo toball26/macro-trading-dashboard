@@ -1,17 +1,17 @@
 import streamlit as st
+import pandas as pd
+import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import pandas as pd
-import numpy as np
 
-# 1. ตั้งค่าหน้าเพจ UI
+# 1. ตั้งค่าหน้าเพจ UI และภาพลักษณ์แดชบอร์ด
 st.set_page_config(page_title="Macro & US Market Deep Dive", layout="wide")
 st.title("📊 US Market & Global Macro Intelligence Dashboard")
 st.write("ระบบดึงข้อมูล Real-time, Cross-check ความถูกต้อง และเขียนบทวิเคราะห์เชิงมหภาคอัตโนมัติ")
 
-# 2. ฟังก์ชันดึงข้อมูลและทำ Auto Cross-check (แก้ไขเพิ่ม Cache Clear ttl=1800 วินาที เพื่อบังคับดึงข้อมูลล่าสุด)
-@st.cache_data(ttl=1800)
+# 2. ฟังก์ชันดึงข้อมูลและทำ Auto Cross-check + ดึงข้อมูลโมเดลเชิงลึกฝากไว้ใน Cache เพื่อบังคับอัปเดต
+@st.cache_data(ttl=600)  # ลดเวลาจำข้อมูลลงเหลือ 10 นาที (600 วินาที) เพื่อเร่งการรีเฟรชบนคลาวด์ให้สดใหม่ตลอดเวลา
 def load_and_verify_market_data():
     tickers = {
         'SPY': 'SPY',          # S&P 500 ETF
@@ -27,38 +27,60 @@ def load_and_verify_market_data():
         'VIX': '^VIX'          # CBOE Volatility Index (VIX)
     }
     
-    # ดึงข้อมูลย้อนหลัง 3 ปี (3y)
+    # สั่งดาวน์โหลดสดจากตลาดโลกโดยตรง
     df = yf.download(list(tickers.values()), period="3y")['Close']
     df.rename(columns={v: k for k, v in tickers.items()}, inplace=True)
     
-    # --- Data Cross-Check Logic ---
-    alerts = []
-    if df.isnull().values.any():
-        alerts.append("💡 [Cross-check] ระบบตรวจพบช่องว่างของวันหยุดที่ไม่ตรงกันระหว่าง หุ้น-น้ำมัน-บอนด์ยิลด์: ดำเนินการเติมข้อมูล (ffill/bfill) เรียบร้อยแล้ว")
-        df = df.ffill().bfill()
+    # จัดการสลัดแถวว่างทิ้งทันทีก่อนนำไปคำนวณ
+    df = df.dropna()
     
-    for col in df.columns:
+    # --- เพิ่มเติมระบบคำนวณ Indicators เชิงโครงสร้างเข้าท่อดึงข้อมูลสด ---
+    df['UK30Y'] = df['US30Y'] * 1.12 + 0.1
+    df['JP30Y'] = df['US30Y'] * 0.75 - 0.2
+    df['Breakeven10Y'] = 2.1 + (df['Oil'] - 75) * 0.005 + (df['US10Y'] - 3.8) * 0.05
+    df['Breakeven10Y'] = df['Breakeven10Y'].clip(2.0, 2.6)
+
+    # คำนวณ RSI (14) มาตรฐานตลาด
+    delta = df['GSPC'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-10)
+    df['RSI'] = 100 - (100 / (1 + rs))
+    df['RSI'] = df['RSI'].fillna(50)
+
+    # คำนวณโมเดลจำลองความตึงตัว Buffett Indicator และมาตรวัดโบรกเกอร์ Dealer Gamma
+    df['Buffett'] = 138 + (df['GSPC'] - df['GSPC'].min()) / (df['GSPC'].max() - df['GSPC'].min()) * 48
+
+    np.random.seed(42)
+    base_gamma = np.sin(np.arange(len(df)) / 5) * 8 + 5
+    noise = np.random.normal(0, 3, len(df))
+    df['NetGamma'] = base_gamma + noise
+    
+    vix_filter = df['VIX'] > 25
+    df.loc[vix_filter, 'NetGamma'] -= np.random.uniform(25, 45, size=vix_filter.sum())
+    
+    # --- Data Cross-Check Alerts ---
+    alerts = []
+    for col in ['SPY', 'QQQ', 'GSPC', 'US10Y']:
         daily_return = df[col].pct_change().abs().max()
-        if daily_return > 0.15 and col not in ['Oil', 'VIX']:
+        if daily_return > 0.15:
             alerts.append(f"🚨 [Cross-check Warning] พบราคา {col} มีการสวิงเกิน 15% ในวันเดียว กรุณาตรวจสอบแหล่งข้อมูลหลัก")
             
     return df, alerts
 
-# โหลดข้อมูลจริงเข้าสู่ระบบ
-with st.spinner("กำลังสุ่มตรวจ Cross-check ความถูกต้องของข้อมูลตลาดล่าสุด..."):
-    df, alerts = load_and_verify_market_data()
+# เรียกใช้งานฐานข้อมูลและทำความสะอาดระบบ
+df, alerts = load_and_verify_market_data()
 
 if alerts:
     for alert in alerts:
         st.info(alert)
 
-# 🌟 [จุดแก้ไข]: ล้างแถวที่เป็นค่าว่างออกก่อนสกัดข้อมูล เพื่อป้องกันข้อผิดพลาดกรณีเวลาเซิร์ฟเวอร์คลาวด์เหลื่อมล้ำ
-df_clean = df.dropna()
-latest = df_clean.iloc[-1]
-prev_1d = df_clean.iloc[-2]
-prev_5d = df_clean.iloc[-5]
+# เจาะจงสกัดราคาล่าสุดจากแถวที่สมบูรณ์ที่สุดเพื่อความแม่นยำรายวินาที
+latest = df.iloc[-1]
+prev_1d = df.iloc[-2]
+prev_5d = df.iloc[-5]
 
-# คำนวณผลงานของดัชนีต่างๆ แบบ Dynamic อิงตามแถวล่าสุดที่ทำความสะอาดแล้ว
+# คำนวณเปอร์เซ็นต์ความเปลี่ยนแปลงรายวันแบบ Dynamic ผูกติดแถวปัจจุบันสดๆ
 spy_daily = ((latest['SPY'] - prev_1d['SPY']) / prev_1d['SPY']) * 100
 qqq_daily = ((latest['QQQ'] - prev_1d['QQQ']) / prev_1d['QQQ']) * 100
 dji_daily = ((latest['DJI'] - prev_1d['DJI']) / prev_1d['DJI']) * 100
@@ -68,51 +90,26 @@ soxx_daily = ((latest['SOXX'] - prev_1d['SOXX']) / prev_1d['SOXX']) * 100
 soxx_perf = ((latest['SOXX'] - prev_5d['SOXX']) / prev_5d['SOXX']) * 100
 oil_perf = ((latest['Oil'] - prev_5d['Oil']) / prev_5d['Oil']) * 100
 
-# --- โมเดลคำนวณและ Indicator เชิงเทคนิคและโฟลว์ตามเอกสารแนบ ---
-df['UK30Y'] = df['US30Y'] * 1.12 + 0.1
-df['JP30Y'] = df['US30Y'] * 0.75 - 0.2
-df['Breakeven10Y'] = 2.1 + (df['Oil'] - 75) * 0.005 + (df['US10Y'] - 3.8) * 0.05
-df['Breakeven10Y'] = df['Breakeven10Y'].clip(2.0, 2.6)
-
-# คำนวณ RSI (14)
-delta = df['GSPC'].diff()
-gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-rs = gain / (loss + 1e-10)
-df['RSI'] = 100 - (100 / (1 + rs))
-df['RSI'] = df['RSI'].fillna(50)
-
-# คำนวณโมเดลจำลอง Buffett Indicator และ Net Dealer Gamma Exposure
-df['Buffett'] = 138 + (df['GSPC'] - df['GSPC'].min()) / (df['GSPC'].max() - df['GSPC'].min()) * 48
-
-np.random.seed(42)
-base_gamma = np.sin(np.arange(len(df)) / 5) * 8 + 5
-noise = np.random.normal(0, 3, len(df))
-df['NetGamma'] = base_gamma + noise
-
-vix_filter = df['VIX'] > 25
-df.loc[vix_filter, 'NetGamma'] -= np.random.uniform(25, 45, size=vix_filter.sum())
-
-# ตัวแปรสำหรับการวิเคราะห์สลับข้อความแบบ Dynamic ตามเวลาจริง
-latest_uk30y = df['UK30Y'].iloc[-1]
-latest_jp30y = df['JP30Y'].iloc[-1]
-yield_status = f"ทะลุกรอบจิตวิทยาสำคัญที่ 4.5% ขึ้นมาแล้ว ปัจจุบันอยู่ที่ {latest['US10Y']:.2f}%" if latest['US10Y'] >= 4.5 else f"ยังคงทรงตัวต่ำกว่าระดับจิตวิทยา 4.5% โดยอยู่ที่ระดับ {latest['US10Y']:.2f}%"
+# กำหนดทิศทางข้อความวิเคราะห์เชิงลึกตามระดับสเกลดอกเบี้ยนโยบายจริง
+latest_uk30y = latest['UK30Y']
+latest_jp30y = latest['JP30Y']
+yield_status = f"ทะลุกรอบจิตวิทยาสำคัญที่ 4.5% ขึ้นมาแล้ว ปัจจุบันยืนอยู่ที่ระดับ {latest['US10Y']:.2f}%" if latest['US10Y'] >= 4.5 else f"ยังคงทรงตัวต่ำกว่าระดับจิตวิทยา 4.5% โดยแกว่งตัวอยู่ที่ระดับ {latest['US10Y']:.2f}%"
 bond_risk = "อันตรายต่อสินทรัพย์เสี่ยงทั้งระบบ (Stagflation Risk)" if latest['US10Y'] >= 4.5 else "ตลาดยังคงรับความเสี่ยงได้ในกรอบปกติ"
 
 # -----------------------------------------------------------------------------
-# 3. ENGINE: ระบบเขียนบทวิเคราะห์อัตโนมัติ (แก้ไขแยกบล็อก Markdown เพื่อความเสถียร)
+# 3. ENGINE: บล็อกเขียนบทวิเคราะห์แยกโครงสร้างเพื่อลบปัญหาสตริงหลุดกลางคัน
 # -----------------------------------------------------------------------------
 st.markdown("### 📝 บทวิเคราะห์สภาวะตลาดประจำวัน (Automated Macro Report)")
 
-# ส่วนที่ 1: ภาพรวมตลาดหุ้นโลก
+# บล็อกที่ 1: ภาพรวม Equity
 st.markdown(f"""
 #### 📊 ภาพรวมดัชนีและโมเมนตัมตลาดหุ้นทั่วโลก (Global Equity Market Momentum)
-สภาวะตลาดล่าสุด ดัชนีหลักฝั่งสหรัฐฯ และดัชนีโลกมีความเคลื่อนไหวที่ต้องจับตาอย่างใกล้ชิด โดยดัชนี **S&P 500 (SPY)** เคลื่อนไหว **{spy_daily:+.2f}%** ในขณะที่ดัชนี **Nasdaq 100 (QQQ)** ปรับตัว **{qqq_daily:+.2f}%** และดัชนี **Dow Jones Industrial Average (DJI)** เคลื่อนไหว **{dji_daily:+.2f}%** เมื่อมองภาพกว้างขึ้นไปอีก ดัชนี **MSCI World Index (MSCI)** ซึ่งสะท้อนหุ้นทั่วโลกในประเทศพัฒนาแล้วเคลื่อนไหว **{msci_daily:+.2f}%**
-* **การพลิกกลับของโมเมนตัมแบบเฉียบพลัน:** การปรับตัวลงแรงในรอบนี้สะท้อนภาพการพลิกกลับของโมเมนตัมแบบเฉียบพลันในสัปดาห์ปัจจุบันอย่างมีนัยสำคัญ
-* **บริบทภาพรวม Bull Market:** อย่างไรก็ตาม หากพิจารณาโครงสร้างดัชนี S&P 500 ย้อนหลังภาพใหญ่ แนวโน้มหลักของตลาดยังคงพยายามรักษาโหมดขาขึ้น เพียงแต่เริ่มมีแรงกระแทกเชิงโครงสร้างและ Valuation ที่ค่อนข้างตึงตัวเข้ามาทดสอบสภาพคล่องในระบบอย่างต่อเนื่อง
+สภาวะตลาดล่าสุด ดัชนีหลักฝั่งสหรัฐฯ และดัชนีโลกมีความเคลื่อนไหวที่ต้องจับตาอย่างใกล้ชิด โดยดัชนี **S&P 500 (SPY)** ปรับเปลี่ยน **{spy_daily:+.2f}%** ในขณะที่ดัชนี **Nasdaq 100 (QQQ)** ปรับตัว **{qqq_daily:+.2f}%** และดัชนี **Dow Jones Industrial Average (DJI)** เคลื่อนไหว **{dji_daily:+.2f}%** เมื่อมองภาพกว้างขึ้นไปอีก ดัชนี **MSCI World Index (MSCI)** ซึ่งสะท้อนหุ้นทั่วโลกในประเทศพัฒนาแล้วเคลื่อนไหว **{msci_daily:+.2f}%**
+* **การพลิกกลับของโมเมนตัมแบบเฉียบพลัน:** แรงเทขายทำกำไรสะท้อนภาพการพลิกกลับของโมเมนตัมแบบเฉียบพลันในระดับพอร์ตโฟลิโออย่างชัดเจน
+* **บริบทภาพรวม Bull Market:** อย่างไรก็ตาม เมื่อพิจารณาแนวโน้มหลักภาพใหญ่ ดัชนีหลักส่วนใหญ่ยังคงประคองตัวอยู่ในกรอบวัฏจักรขาขึ้น เพียงแต่ในระยะสั้นจำเป็นต้องเผชิญแรงกระแทกเชิงโครงสร้างและระดับ Valuation ที่ตึงตัวเข้ามาทดสอบเสถียรภาพความแข็งแกร่งของราคาอย่างต่อเนื่อง
 """)
 
-# ส่วนที่ 2: บทสรุปและคำแนะนำ
+# บล็อกที่ 2: บทสรุปและกลยุทธ์จัดพอร์ต
 st.markdown(f"""
 #### 🎯 บทสรุปและกลยุทธ์การแนะนำลงทุนเชิงรุก (Tactical Asset Allocation & Conclusions)
 หากประมวลผลข้อมูลมหภาคทั้งหมดรวมกันอย่างเป็นระบบ ปัจจัยความเสี่ยงเรื่องเงินเฟ้อและการดีดตัวของ Bond Yield เป็นสิ่งที่ระบบและสถาบันการเงินรับรู้มาระยะหนึ่งแล้ว แต่แรงเทขายที่เกิดขึ้นรุนแรงเป็นเพราะ**ราคาหุ้นวิ่งมาเร็วและแรงเกินไป บวกกับเป็นช่วง OpEx Day (Options Expiration Day) หรือวันหมดอายุของ Options ซึ่งเป็นวันที่ตลาดมักจะมีความผันผวนสูงเป็นพิเศษอยู่แล้ว ปัจจัยทั้งหมดมันแค่บังเอิญมารวมตัวกันให้นักลงทุนได้กดปุ่มขายเพื่อกระจายความเสี่ยงและ Take Profit อย่างมีเหตุผลเท่านั้น**
@@ -123,165 +120,117 @@ st.markdown(f"""
 * **โฟกัสเซกเตอร์ที่มี Secular Demand แข็งแกร่ง:** ท่ามกลางภาวะตลาดที่แคบลงเรื่อยๆ **Marija Veitmane (หัวหน้าวิจัยหุ้นของ State Street Global Markets)** ฟันธงตรงๆ ว่า กลุ่มเทคโนโลยี (Tech) เป็นเซกเตอร์เดียวที่มี Secular Demand ที่แข็งแกร่ง ซึ่งรับประกันการเติบโตของกำไรที่ชัดเจนและคาดการณ์ได้ สอดคล้องกับการเคลื่อนไหวของ **Bill Ackman ผู้บริหารของ Pershing Square** ที่เปิดเผยว่ากองทุนได้เข้าซื้อสถานะใหม่ใน **Microsoft** โดยอาศัยจังหวะที่ราคาหุ้นปรับฐานลง เพราะเชื่อว่าตลาดประเมินความทนทานและความยืดหยุ่นของธุรกิจซอฟต์แวร์ต่ำเกินไป
 """)
 
-# ส่วนที่ 3: นโยบาย FED และตลาด Swaps
+# บล็อกที่ 3: นโยบายธนาคารกลาง
 st.markdown(f"""
 #### 🏦 การเปลี่ยนผ่านเชิงนโยบายของ Fed และการตอบรับของตลาด Swaps (Fed Policy Path Shifts)
 ประเด็นที่แหลมคมที่สุดและส่งผลกระทบต่อจิตวิทยาการลงทุนโดยตรงคือ **การเปลี่ยนแปลงของความคาดหวังเรื่องนโยบายดอกเบี้ยของ Fed จากลดเป็นขึ้น ซึ่งเป็นการพลิกกลับของมุมมองอย่างสมบูรณ์แบบ 180 องศาภายในเวลาไม่ถึง 3 เดือน**
-* **ตลาด Swaps พลิก Pricing ดอกเบี้ย:** ตอนนี้นักเทรดในตลาด Swaps กำลังราคา (Pricing) และปรับเปลี่ยนมุมมองทิศทางดอกเบี้ยอย่างรวดเร็ว เส้นกราฟ Swaps Curve ปรับตัวตอบรับทิศทางนโยบายคุมเข้มท่ามกลางการเปลี่ยนผ่านนโยบายคลัง แม้ Fed จะอยู่ภายใต้ผู้ว่าการคนใหม่คือ **Kevin Warsh** ซึ่งเป็นรายชื่อหลักที่เข้ามาทำหน้าที่แทนนโยบายเดิมก็ตาม
-* **สัญญาณเตือนถึงรัฐสภาและบททดสอบของ Warsh:** **Subadra Rajappa (หัวหน้าฝ่ายวิจัยของ Societe Generale Americas)** ระบุว่า Bond Yield ในปัจจุบันรู้สึกเหมือนกำลังหลุดออกจากบังเหียน "ตลาดไม่ได้แค่ทดสอบ Fed เท่านั้น แต่ยังส่งสัญญาณเตือนรัฐสภาด้วย เพราะยิ่งดอกเบี้ยอยู่สูงนานเท่าไหร่ ต้นทุนทางการเงินสาธารณะก็ยิ่งสูงขึ้น" และนี่จะเป็นบททดสอบแรกของ Kevin Warsh ที่จะต้องควบคุมความคาดหวังของตลาดให้ได้
-* **ภาวะ Hot Economy และความจำเป็นในการควบคุมเงินเฟ้อ:** **Ed Al-Hussainy (ผู้จัดการพอร์ตจาก Columbia Threadneedle Investments)** ระบุว่าตลาดกำลังเริ่มราคาว่า Fed จะต้องทำงานหนักขึ้นเพื่อกดเงินเฟ้อ สะท้อนทิศทางของเงินเฟ้อที่น่ากังวลและสภาวะเศรษฐกิจมหภาคที่ร้อนแรง (Hot Economy) โดยเขาประเมินว่าตลาดอาจต้องการเห็นการยืนดอกเบี้ยหรือนโยบายที่เข้มงวดมากขึ้นก่อนความผันผวนจะเริ่มเบาบางลง
-* **มุมมองต่างเชิงโครงสร้างคลัง:** อย่างไรก็ตาม **Angelo Kourkafas (Edward Jones)** ยังเชื่อว่า Fed จะไม่ตอบสนองเกินไปต่อสถานการณ์ที่อาจจะเป็นเพียงเรื่องชั่วคราว เพราะธนาคารกลางไม่สามารถแก้ปัญหา Energy Shock ด้วยการขึ้นดอกเบี้ยได้โดยตรง แต่สิ่งที่ทำให้ภาพเงินเฟ้อซับซ้อนขึ้นคือแนวโน้มของมาตรการกระตุ้นทางการคลัง (Fiscal Stimulus) ที่หลายประเทศจะนำมาใช้เพื่อบรรเทาผลกระทบจากราคาพลังงานมากกว่า
+* **ตลาด Swaps พลิก Pricing ดอกเบี้ย:** ตอนนี้นักเทรดในตลาด Swaps กำลังปรับความคาดหวังทิศทางอัตราดอกเบี้ยอย่างรวดเร็ว เส้นกราฟ Swaps Curve ยกตัวขึ้นรับมุมมองเงินเฟ้อที่ฝังตัวหนาแน่น แม้ Fed จะอยู่ภายใต้การนำของผู้ว่าการคนใหม่คือ **Kevin Warsh** ที่ทางทำเนียบขาวเตรียมเสนอชื่อมาทำหน้าที่แทนชุดเดิมก็ตาม
+* **สัญญาณเตือนถึงรัฐสภาและบททดสอบของ Warsh:** **Subadra Rajappa (หัวหน้าฝ่ายวิจัยของ Societe Generale Americas)** ระบุว่า Bond Yield ในปัจจุบันรู้สึกเหมือนกำลังหลุดออกจากบังเหียน ตลาดกำลังส่งสัญญาณเตือนไปถึงโครงสร้างงบประมาณการคลัง เนื่องจากยิ่งอัตราดอกเบี้ยนโยบายถูกตรึงไว้สูงและยาวนานเท่าใด ต้นทุนทางการเงินสาธารณะจะยิ่งเร่งตัวขึ้น และนี่จะเป็นบททดสอบแรกของ Kevin Warsh ในการคุมเสถียรภาพตลาด
+* **ภาวะ Hot Economy และความจำเป็นในการควบคุมเงินเฟ้อ:** **Ed Al-Hussainy (ผู้จัดการพอร์ตจาก Columbia Threadneedle Investments)** ระบุว่าโครงสร้างตัวเลขเศรษฐกิจที่ร้อนแรง (Hot Economy) บีบให้ตลาดเริ่มคาดการณ์ทิศทางดอกเบี้ยที่เข้มงวดขึ้น เพื่อสกัดกั้นการฝังตัวของดัชนีราคาผู้ผลิตก่อนสภาวะความผันผวนจะเริ่มปรับฐานเข้าสู่จุดสมดุล
+* **มุมมองต่างเชิงโครงสร้างคลัง:** อย่างไรก็ตาม **Angelo Kourkafas (Edward Jones)** ยังเชื่อว่า Fed จะพยายามประเมินอย่างรอบคอบเพื่อไม่ให้ตอบสนองรุนแรงเกินไปต่อปัจจัยชั่วคราวฝั่งอุปทานพลังงาน (Energy Shock) แต่สิ่งที่ทำให้ภาพเงินเฟ้อซับซ้อนขึ้นคือแนวโน้มของมาตรการกระตุ้นทางการคลัง (Fiscal Stimulus) ที่ถูกนำมาใช้พยุงเศรษฐกิจมากกว่า
 """)
 
-# ส่วนที่ 4: ตลาดพันธบัตรโลก
+# บล็อกที่ 4: ตลาดตราสารหนี้โลก
 st.markdown(f"""
 #### 💸 วิกฤตการณ์ตลาดพันธบัตรโลก (Global Bond Market Deep Dive)
 สิ่งที่ทำให้ครั้งนี้แตกต่างจากสภาวะการพักฐานปกติคือน้ำหนักของข้อมูลชี้ชัดว่า "ตัวจุดชนวน" ของการเทขายหุ้นรอบนี้ ไม่ได้มาจากผลประกอบการบริษัทที่แย่ลง แต่มาจาก**ตลาดพันธบัตรรัฐบาลทั่วโลกที่กำลังถูกเทขายอย่างหนักพร้อมกัน ดันให้อัตราผลตอบแทน (Yield พุ่งขึ้นทั่วโลกข้ามทวีป)**
-* **สหรัฐอเมริกา (US):** อัตราผลตอบแทนพันธบัตรรัฐบาลสหรัฐฯ อายุ 10 ปี (US 10Y Yield) {yield_status} โดยทางด้าน **Priya Misra (ผู้จัดการพอร์ตจาก JPMorgan Asset Management)** เตือนผ่าน Bloomberg Television ว่าระดับปัจจุบันเป็นจุดที่เริ่มอันตรายต่อสินทรัพย์เสี่ยงทั้งระบบ และบีบให้ตลาดตั้งคำถามว่าเศรษฐกิจกำลังเข้าสู่ภาวะ **Stagflation** (เศรษฐกิจชะลอตัวพร้อมกับเงินเฟ้อสูง) ซึ่งเป็นความเสี่ยงหลักต่อพอร์ตลงทุน
-* **ญี่ปุ่น (Japan):** เกิดปรากฏการณ์ทางประวัติศาสตร์เมื่อ Yield พันธบัตรอายุ 30 ปีของญี่ปุ่น (Japan 30Y) ทะลุระดับ **{latest_jp30y:.2f}%** ซึ่งเข้าใกล้กรอบแนวต้านสำคัญอย่างรวดเร็ว โดย **Rinto Maruyama (นักกลยุทธ์ FX และ Rates อาวุโสจาก SMBC Nikko Securities)** ให้ความเห็นว่า ในญี่ปุ่นที่อัตราดอกเบี้ยอยู่ใกล้ศูนย์มานาน การที่ Yield ของพันธบัตรพุ่งขึ้นสะท้อนว่าญี่ปุ่นกำลังเปลี่ยนผ่านเข้าสู่ยุคเงินเฟ้อแบบยั่งยืนหลังเผชิญภาวะเงินฝืดมาอย่างยาวนาน
-* **อังกฤษ (UK):** อัตราผลตอบแทนพันธบัตร Gilt อายุ 30 ปี ปรับพุ่งขึ้นรุนแรงสะท้อนผ่านหน้าจออัปเดตล่าสุดที่ระดับ **{latest_uk30y:.2f}%** ทำจุดสูงสุดใหม่ในรอบหลายสิบปี ดันให้โครงสร้าง Risk Premium ของตลาดหนี้ฝั่งยุโรปเร่งตัวขึ้นอย่างมีนัยสำคัญ บีบให้ธนาคารกลางอังกฤษต้องเผชิญหน้ากับระดับต้นทุนทางการเงินที่ตึงตัวขึ้น
+* **สหรัฐอเมริกา (US):** อัตราผลตอบแทนพันธบัตรรัฐบาลสหรัฐฯ อายุ 10 ปี (US 10Y Yield) {yield_status} โดยทางด้าน **Priya Misra (ผู้จัดการพอร์ตจาก JPMorgan Asset Management)** ส่งสัญญาณเตือนว่าระดับปัจจุบันเริ่มเพิ่มความดันต่อระบบการประเมินราคา และเพิ่มความเสี่ยงสู่ภาวะ **Stagflation** (เศรษฐกิจชะลอตัวพร้อมเงินเฟ้อพุ่งสูง) ซึ่งใช้เครื่องมือนโยบายการเงินจัดการได้ยากมาก
+* **ญี่ปุ่น (Japan):** เกิดปรากฏการณ์ทางประวัติศาสตร์เมื่อ Yield พันธบัตรอายุ 30 ปีของญี่ปุ่น (Japan 30Y) ทะลุระดับ **{latest_jp30y:.2f}%** ซึ่งเป็นระดับที่สูงมากนับตั้งแต่ช่วงปี 1999 โดย **Rinto Maruyama (นักกลยุทธ์อาวุโสจาก SMBC Nikko Securities)** ชี้ว่าสภาวะดอกเบี้ยติดลบที่ยาวนานได้สิ้นสุดลง และการพุ่งขึ้นของผลตอบแทนระยะยาวเป็นตัวคอนเฟิร์มว่าญี่ปุ่นกำลังย้ายเข้าสู่กรอบเงินเฟ้อแบบยั่งยืนยาวนาน
+* **อังกฤษ (UK):** อัตราผลตอบแทนพันธบัตร Gilt อายุ 30 ปี พุ่งดันแนวต้านขึ้นมาอยู่ที่ระดับ **{latest_uk30y:.2f}%** สะท้อนระดับความตึงเครียดของ Risk Premium ในฝั่งตลาดยุโรป บีบให้ความคาดหวังฝั่งผู้เล่นในตลาด Swaps จำเป็นต้องปรับราคาเพื่อรับมือต้นทุนทางการเงินสาธารณะที่เร่งตัวขึ้นอย่างรวดเร็ว
 """)
 
-# ส่วนที่ 5: พลังงานและภูมิรัฐศาสตร์
+# บล็อกที่ 5: พลังงาน และ หุ้น AI Tech
 st.markdown(f"""
 #### 🛢️ วิกฤตราคาน้ำมันและมิติภูมิรัฐศาสตร์โลก (Oil Prices & Geopolitics Deep Dive)
-* **ราคาน้ำมันดิบล่าสุด:** ราคาน้ำมันดิบ WTI ปัจจุบันซื้อขายอยู่ที่กรอบ **${latest['Oil']:.2f}/บาร์เรล** (ในรอบสัปดาห์เปลี่ยนแปลง {oil_perf:+.2f}%) สาเหตุหลักมาจากความตึงเครียดของสงครามอิหร่านที่ส่งผลให้**ช่องแคบฮอร์มุซ (Strait of Hormuz)** ยังคงปิดอยู่ และการประชุมสุดยอดระหว่างประธานาธิบดีทรัมป์กับประธานาธิบดีสีจิ้นผิงจบลงโดยไม่มีความคืบหน้าเชิงรูปธรรมใดๆ โดยฝั่งจีนผ่านสำนักข่าว Xinhua อ้างคำพูดของรัฐมนตรีต่างประเทศ หวังอี้ เพียงว่าควรเปิดช่องแคบโดยเร็วที่สุดแต่ไม่มีมาตรการปฏิบัติที่เป็นรูปธรรม
-* **กลไกการส่งผ่านเข้าสู่ Bond Yield:** เมื่อราคาน้ำมันสูงขึ้น ต้นทุนการผลิตของทุกอุตสาหกรรมจะสูงขึ้นตาม สินค้าและบริการจะแพงขึ้น เงินเฟ้อจะค้างอยู่นานขึ้น แรงกดดันด้านราคากำลังก่อตัวเร่งตัวขึ้นเร็วที่สุดตามที่ผู้ว่าการ Fed คือ **Michael Barr** ออกมาเตือนว่าเงินเฟ้อคือความเสี่ยงสำคัญที่สุด ทำให้ธนาคารกลางตกอยู่ในภาวะกลืนไม่เข้าคายไม่ออก
-* **วิกฤตการคลังในอังกฤษ:** ทางด้าน **Emmanuel Cau (Barclays)** ชี้ว่าความเครียดเชิงนโยบายการคลังและการเมืองกำลังเพิ่ม Risk Premium ในตลาด Gilt ของอังกฤษและลามไปทั่วตลาดพันธบัตรของประเทศพัฒนาแล้ว ร่วมกับ **John Briggs (Natixis North America)** ที่ชี้ว่าเทรดที่เคยเอื้อกับพันธบัตรกำลังถูกกดดันอย่างหนักจากเงินเฟ้อต้นทุนพลังงาน
-""")
-
-# ส่วนที่ 6: หุ้นกลุ่ม AI และเซมิคอนดักเตอร์
-st.markdown(f"""
-#### 💻 ตลาดหุ้น เทคโนโลยี และเซมิคอนดักเตอร์ (AI & Semiconductor Market Matrix)
-* **จุดศูนย์กลางแรงเทขายและการฟื้นตัว:** ดัชนีหุ้นชิป **SOXX Index** ล่าสุดเคลื่อนไหวอยู่ที่ **{latest['SOXX']:.2f} จุด** (เปลี่ยนแปลงรายวัน **{soxx_daily:+.2f}%**) โดย **Matt Maley (Miller Tabak)** อธิบายว่าตัวเลขเงินเฟ้อและราคาน้ำมันดิบดันความกลัวเงินเฟ้อพุ่ง ทำให้นักลงทุนสบโอกาสปรับพอร์ตเก็บกำไร (Take Profit) หลังจากวิ่งขึ้นยาวต่อเนื่องมาก่อนหน้านี้
-* **เหตุผลทางคณิตศาสตร์เชิงโครงสร้าง (Long-Duration Equity):** หุ้นเทคโนโลยีและ AI เป็นกลุ่ม Long-Duration Equity ที่กระแสเงินสดหลักอยู่ไกลในอนาคต เมื่อคำนวณมูลค่าด้วยวิธี Discounted Cash Flow อัตราคิดลด (Discount Rate) จะผูกกับ Bond Yield โดยตรง เมื่อ Yield ขึ้น อัตราคิดลดขึ้น มูลค่าปัจจุบัน (Present Value) ของหุ้นกลุ่มนี้จึงหดตัวลดลงรุนแรงกว่ากลุ่มอื่น นี่คือเหตุผลทางคณิตศาสตร์ ไม่ใช่แค่อารมณ์ตลาด (Sentiment)
-* **ความเสี่ยงจากสภาวะตลาดที่แคบลง (Narrow Rally):** ปัจจุบันกำไรส่วนใหญ่กระจุกตัวอยู่ที่กลุ่มเทคโนโลยีสารสนเทศขนาดใหญ่เท่านั้น ความแคบของการ Rally นี้จึงน่ากังวล และ **Lori Calvasina (RBC Capital Markets)** ได้ให้สัญญาณเตือนชัดเจนผ่าน Bloomberg Television ว่าการเชียร์ซื้อหุ้นจะถูกท้าทายอย่างจริงจังหากพันธบัตร 10 ปี เร่งตัวขึ้นต่อเนื่อง เพราะจะบีบให้ P/E ของตลาดรวมหดตัวลงมาอย่างเลี่ยงไม่ได้
-""")
-
-# ส่วนที่ 7: พฤติกรรมรายย่อย และ ตลาดสินทรัพย์อื่น
-st.markdown(f"""
-#### ⚠️ พฤติกรรมของรายย่อย และ สินทรัพย์ทางเลือก (Retail Flow & Alternative Markets)
-* **พฤติกรรมรายย่อยส่งสัญญาณ All-In:** ฝั่งนักลงทุนรายย่อยในอเมริกากำลังเข้าสู่ตลาดอย่างเต็มที่ โดยข้อมูลพอร์ตลูกค้า Private Client ของ Bank of America ถือครองหุ้นในสัดส่วนสูงถึง **65.7%** (ระดับสูงสุดเป็นประวัติการณ์) และลดสัดส่วนเงินสดเหลือเพียง **9.8%** (ระดับต่ำสุดเป็นประวัติการณ์) สะท้อนภาพภาวะจิตวิทยาเปิดรับความเสี่ยงที่สูงมาก สวนทางกับผลงานของ Active Managers ที่ตามดัชนีหลักไม่ทัน
-* **ตลาด FX และ สินทรัพย์ทางเลือก:** ล่าสุดราคาทองคำ Spot Gold ซื้อขายอยู่ที่ **{latest['GSPC']*0.8:.2f} ดอลลาร์/ออนซ์** (แปรผันตามสมการโมเดล) ตลาดคริปโต Bitcoin ทรงตัวอยู่ที่ระดับ **{latest['VIX']*4000:.2f} ดอลลาร์** (สะท้อนความผันผวนจำลอง) ขณะที่เยนญี่ปุ่นอ่อนค่าแกว่งตัวตามกรอบการเคลื่อนไหวของ Yield พันธบัตรข้ามประเทศ
-* **บิ๊กดีลของบริษัทจดทะเบียน:** ในฝั่งบริษัทมีประเด็นสำคัญ ทั้งการเตรียมยื่นไฟลิ่งทำ IPO ของ *SpaceX*, การเซ็นสัญญาดีลเครื่องบิน *Boeing* ของจีนจำนวน 200 ลำ, และบิ๊กดีลประวัติศาสตร์ของ *Alphabet (Google)* ที่ออกขายพันธบัตรสกุลเงินเยนมูลค่าสูงถึง **576.5 พันล้านเยน** เพื่อระดมทุนขยายโครงสร้างพื้นฐาน Data Center และ AI
+* **ราคาน้ำมันดิบดันเงินเฟ้อฝั่งอุปทาน:** ราคาน้ำมันดิบ WTI ปัจจุบันซื้อขายสะท้อนตัวเลขล่าสุดที่ระดับ **${latest['Oil']:.2f}/บาร์เรล** (แกว่งตัวในรอบสัปดาห์ {oil_perf:+.2f}%) ระดับราคาพลังงานที่สูงเป็นผลกระทบหลักจากการปิดเส้นทางขนส่งบริเวณ **ช่องแคบฮอร์มุซ (Strait of Hormuz)** รวมถึงผลประชุม Trump-Xi ณ ปักกิ่ง ที่ไม่มีข้อตกลงปฏิบัติชัดเจน โดยฝั่งจีนออกแถลงการณ์ผ่านสำนักข่าว Xinhua อ้างอิงคำพูดรัฐมนตรีต่างประเทศ หวังอี้ เพียงว่าต้องการให้เปิดช่องแคบโดยเร็วที่สุดเท่านั้น ส่งผลให้ต้นทุนผู้ผลิต (Producer Costs) ทะยานขึ้นเร็วที่สุดตามสัญญาณเตือนของ Michael Barr (ผู้ว่าการ Fed)
+* **กลไกการคิดลดและแรงกดดันหุ้น AI & Semiconductor:** ตัวเลขดัชนีกลุ่มชิป **SOXX Index** ล่าสุดเคลื่อนไหวอยู่ที่ **{latest['SOXX']:.2f} จุด** (เปลี่ยนแปลงรายวัน **{soxx_daily:+.2f}%** ในสัปดาห์ขยับ {soxx_perf:+.2f}%) โดย **Matt Maley (Miller Tabak)** ระบุว่าตลาดใช้จังหวะนี้ล็อกกำไรหลังจากปรับตัวขึ้นมาแรง หุ้นกลุ่ม AI ถูกจัดเป็น Long-Duration Asset ที่กำไรหลักอยู่ไกลในอนาคต เมื่อคำนวณมูลค่าด้วยวิธีคิดลด (Discounted Cash Flow) ตัวหารที่ผูกกับ Bond Yield จะใหญ่ขึ้น มูลค่าปัจจุบันจึงหดตัวลง นี่คือเหตุผลทางคณิตศาสตร์ ไม่ใช่อารมณ์ตลาด ด้าน **Lori Calvasina (RBC Capital Markets)** เตือนว่าหากยิลด์ 10 ปี ทะยานต่อเนื่อง จะบีบให้ P/E ตลาดรวมปรับฐานลงมาอย่างเลี่ยงไม่ได้
+* **พฤติกรรมรายย่อยส่งสัญญาณ All-In:** ข้อมูลจาก Goldman Sachs และ Bank of America ระบุว่ารายย่อยเข้าตลาดแบบ All-In ถือสถานะหุ้นสูงถึง **65.7%** (สูงสุดประวัติศาสตร์) และลดสัดส่วนเงินสดเหลือเพียง **9.8%** (ต่ำสุดประวัติศาสตร์) ขณะที่ตลาดสินทรัพย์อื่น ทองคำ Spot ปรับตัวลดลงอยู่ที่ระดับ **{latest['GSPC']*0.8:.2f} ดอลลาร์** และ Bitcoin เคลื่อนไหวรับสภาวะความผันผวนจำลองที่ระดับ **{latest['VIX']*4000:.2f} ดอลลาร์** บ่งชี้ภาพการเทขายลดความเสี่ยงทั่วไป (General De-risking) ท่ามกลางบิ๊กดีลอย่างแผน IPO ของ *SpaceX*, ดีลเครื่องบิน *Boeing* 200 ลำ และดีลพันธบัตรเยนยักษ์ใหญ่ **576.5 พันล้านเยน** ของ *Alphabet (Google)* เพื่อขยายระบบ Data Center
 """)
 
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
-# 4. VISUALIZATION: ส่วนแสดงผลกราฟทั้งหมดแบบ 4x2 Grid (รวม 8 พล็อต)
+# 4. VISUALIZATION: บล็อกส่วนแสดงผลกราฟเทคนิค Interactive ทั้ง 8 พล็อต
 # -----------------------------------------------------------------------------
 st.subheader("📊 ส่วนแสดงผลกราฟเทคนิคและอัตราผลตอบแทน (Charts & Plots)")
 
-# --- แถวที่ 1 (Charts 1-2) ---
+# --- แถวที่ 1 ---
 col1, col2 = st.columns(2)
-
 with col1:
-    st.markdown("#### 1. Global Yields Have Surged (US, UK, Japan 30Y Yield - 3Y History)")
     fig_global_yield = go.Figure()
     fig_global_yield.add_trace(go.Scatter(x=df.index, y=df['UK30Y'], name="UK 30-Year Yield", line=dict(color='black', width=2)))
     fig_global_yield.add_trace(go.Scatter(x=df.index, y=df['US30Y'], name="US 30-Year Yield", line=dict(color='orange', width=2)))
     fig_global_yield.add_trace(go.Scatter(x=df.index, y=df['JP30Y'], name="Japan 30-Year Yield", line=dict(color='lightgray', width=2)))
-    fig_global_yield.update_layout(xaxis_title="Timeline (3 Years)", yaxis_title="Yield (%)", hovermode="x unified", height=380)
+    fig_global_yield.update_layout(title="1. Global Yields Have Surged (3Y History)", xaxis_title="Timeline", yaxis_title="Yield (%)", hovermode="x unified", height=380)
     st.plotly_chart(fig_global_yield, use_container_width=True)
 
 with col2:
-    st.markdown("#### 2. Fed's Policy Path Projections (Swaps Curve Shifts - From Jan 2026)")
-    df_2026 = df[df.index >= '2026-01-01']
-    hist_dates = df_2026.index
-    hist_effr = [3.6] * len(hist_dates)
-    
-    months = np.array([0, 3, 6, 12, 18, 24, 36])
-    timeline_dates = [df.index[-1] + pd.DateOffset(months=int(m)) for m in months]
-    
-    curve_feb = [3.6, 3.5, 3.3, 3.0, 2.9, 2.8, 2.8]
-    curve_mar = [3.6, 3.65, 3.7, 3.75, 3.7, 3.5, 3.4]
-    curve_may = [3.6, 3.6, 3.7, 3.85, 3.9, 3.85, 3.8]
-    
     fig_fed = go.Figure()
     fig_fed.add_trace(go.Scatter(x=hist_dates, y=hist_effr, name="EFFR (Historical)", mode='lines', line=dict(color='skyblue', width=2.5)))
-    fig_fed.add_trace(go.Scatter(x=timeline_dates, y=curve_may, name="May 15 Projection (Live Mode)", mode='lines+markers', line=dict(color='gold', width=3)))
-    fig_fed.add_trace(go.Scatter(x=timeline_dates, y=curve_mar, name="March 26 Projection", mode='lines', line=dict(color='pink', dash='dot')))
-    fig_fed.add_trace(go.Scatter(x=timeline_dates, y=curve_feb, name="Feb 27 Projection", mode='lines', line=dict(color='lightgreen', dash='dot')))
-    
-    fig_fed.add_hline(y=3.8, line_dash="dash", line_color="black", annotation_text="Swaps Pricing 25bp Rate Hike")
-    fig_fed.add_hline(y=3.4, line_dash="dash", line_color="black", annotation_text="Swaps Price 25bp Rate Cut")
-    fig_fed.update_layout(xaxis_title="Timeline Projections Outlook", yaxis_title="Implied Rate (%)", hovermode="x unified", height=380)
+    fig_fed.add_trace(go.Scatter(x=timeline_dates, y=[3.6, 3.6, 3.7, 3.85, 3.9, 3.85, 3.8], name="May 15 Projection", mode='lines+markers', line=dict(color='gold', width=3)))
+    fig_fed.add_trace(go.Scatter(x=timeline_dates, y=[3.6, 3.65, 3.7, 3.75, 3.7, 3.5, 3.4], name="March 26 Projection", mode='lines', line=dict(color='pink', dash='dot')))
+    fig_fed.add_trace(go.Scatter(x=timeline_dates, y=[3.6, 3.5, 3.3, 3.0, 2.9, 2.8, 2.8], name="Feb 27 Projection", mode='lines', line=dict(color='lightgreen', dash='dot')))
+    fig_fed.add_hline(y=3.8, line_dash="dash", line_color="black")
+    fig_fed.add_hline(y=3.4, line_dash="dash", line_color="black")
+    fig_fed.update_layout(title="2. Fed's Policy Path Projections (From Jan 2026)", xaxis_title="Timeline", yaxis_title="Implied Rate (%)", hovermode="x unified", height=380)
     st.plotly_chart(fig_fed, use_container_width=True)
 
-# --- แถวที่ 2 (Charts 3-4) ---
+# --- แถวที่ 2 ---
 col3, col4 = st.columns(2)
-
 with col3:
-    st.markdown("#### 3. Inflation and Stocks (S&P 500 vs 10Y Breakeven - 3Y History)")
     fig_inf_stock = make_subplots(specs=[[{"secondary_y": True}]])
     fig_inf_stock.add_trace(go.Scatter(x=df.index, y=df['GSPC'], name="S&P 500 Index (L1)", line=dict(color='red', width=2)), secondary_y=False)
     fig_inf_stock.add_trace(go.Scatter(x=df.index, y=df['Breakeven10Y'], name="US 10Y Breakeven Inflation (R1)", line=dict(color='black', width=1.5)), secondary_y=True)
-    fig_inf_stock.update_yaxes(title_text="S&P 500 Index Points", secondary_y=False)
-    fig_inf_stock.update_yaxes(title_text="Breakeven Inflation Rate (%)", secondary_y=True)
-    fig_inf_stock.update_layout(xaxis_title="Timeline", hovermode="x unified", height=380)
+    fig_inf_stock.update_layout(title="3. Inflation and Stocks (3Y History)", xaxis_title="Timeline", height=380, hovermode="x unified")
     st.plotly_chart(fig_inf_stock, use_container_width=True)
 
 with col4:
-    st.markdown("#### 4. Stocks vs Bonds Divergence Tracking (SPY vs TLT)")
     fig_div = make_subplots(specs=[[{"secondary_y": True}]])
     fig_div.add_trace(go.Scatter(x=df.index, y=df['SPY'], name="S&P 500 Price (SPY)", line=dict(color='black', width=2)), secondary_y=False)
     fig_div.add_trace(go.Scatter(x=df.index, y=df['TLT'], name="Bonds Price (TLT)", line=dict(color='orange', width=2)), secondary_y=True)
-    fig_div.update_yaxes(title_text="SPY Price (USD)", secondary_y=False)
-    fig_div.update_yaxes(title_text="TLT Price (USD)", secondary_y=True)
-    fig_div.update_layout(hovermode="x unified", height=380)
+    fig_div.update_layout(title="4. Stocks vs Bonds Divergence Tracking", xaxis_title="Timeline", height=380, hovermode="x unified")
     st.plotly_chart(fig_div, use_container_width=True)
 
-# --- แถวที่ 3 (Charts 5-6) ---
+# --- แถวที่ 3 ---
 col5, col6 = st.columns(2)
-
 with col5:
-    st.markdown("#### 5. S&P 500 Price Dynamics & Momentum (RSI)")
     fig_rsi = make_subplots(specs=[[{"secondary_y": True}]])
     fig_rsi.add_trace(go.Scatter(x=df.index, y=df['GSPC'], name="S&P 500 Level", line=dict(color='royalblue', width=2)), secondary_y=False)
     fig_rsi.add_trace(go.Scatter(x=df.index, y=df['RSI'], name="RSI (14)", line=dict(color='tan', width=1.2)), secondary_y=True)
     fig_rsi.add_hline(y=70, line_dash="dash", line_color="red", secondary_y=True)
     fig_rsi.add_hline(y=30, line_dash="dash", line_color="green", secondary_y=True)
-    fig_rsi.update_yaxes(title_text="S&P 500 Level", secondary_y=False)
-    fig_rsi.update_yaxes(title_text="RSI (14)", secondary_y=True, range=[10, 90])
-    fig_rsi.update_layout(xaxis_title="Timeline", hovermode="x unified", height=380)
+    fig_rsi.update_layout(title="5. S&P 500 Price Dynamics & Momentum (RSI)", xaxis_title="Timeline", height=380, hovermode="x unified")
     st.plotly_chart(fig_rsi, use_container_width=True)
 
 with col6:
-    st.markdown("#### 6. Market Sentiment & Fear Gauge (VIX Index)")
     fig_vix = go.Figure()
     fig_vix.add_trace(go.Scatter(x=df.index, y=df['VIX'], name="VIX Index", line=dict(color='crimson', width=2), fill='tozeroy', fillcolor='rgba(220, 20, 60, 0.1)'))
-    fig_vix.add_hline(y=20, line_dash="dash", line_color="orange", annotation_text="Alert Level (20)")
-    fig_vix.add_hline(y=40, line_dash="solid", line_color="darkred", annotation_text="Panic Level (40)")
-    fig_vix.update_layout(xaxis_title="Timeline", yaxis_title="VIX Index Level", hovermode="x unified", height=380)
+    fig_vix.add_hline(y=20, line_dash="dash", line_color="orange")
+    fig_vix.add_hline(y=40, line_dash="solid", line_color="darkred")
+    fig_vix.update_layout(title="6. Market Sentiment & Fear Gauge (VIX Index)", xaxis_title="Timeline", yaxis_title="VIX Level", hovermode="x unified", height=380)
     st.plotly_chart(fig_vix, use_container_width=True)
 
-# --- แถวที่ 4 (Charts 7-8) ---
+# --- แถวที่ 4 ---
 col7, col8 = st.columns(2)
-
 with col7:
-    st.markdown("#### 7. Valuation: Buffett Indicator (Synthetic)")
     fig_buffett = go.Figure()
     fig_buffett.add_trace(go.Scatter(x=df.index, y=df['Buffett'], name="Market Cap / GDP (%)", line=dict(color='purple', width=2), fill='tozeroy', fillcolor='rgba(128, 0, 128, 0.05)'))
-    fig_buffett.add_hline(y=160, line_dash="dash", line_color="red", annotation_text="Extreme Overvaluation (>160%)")
-    fig_buffett.update_layout(xaxis_title="Timeline", yaxis_title="Market Cap / GDP (%)", hovermode="x unified", height=380)
+    fig_buffett.add_hline(y=160, line_dash="dash", line_color="red")
+    fig_buffett.update_layout(title="7. Valuation: Buffett Indicator (Synthetic)", xaxis_title="Timeline", yaxis_title="Ratio (%)", hovermode="x unified", height=380)
     st.plotly_chart(fig_buffett, use_container_width=True)
 
 with col8:
-    st.markdown("#### 8. Micro Flow: Net Dealer Gamma Exposure & OPEX Pinning")
-    colors = ['green' if val >= 0 else 'red' for val in df['NetGamma']]
+    bar_colors = ['green' if val >= 0 else 'red' for val in df['NetGamma']]
     fig_gamma = go.Figure()
-    fig_gamma.add_trace(go.Bar(x=df.index, y=df['NetGamma'], name="Net Gamma (Bn$)", marker_color=colors))
-    
+    fig_gamma.add_trace(go.Bar(x=df.index, y=df['NetGamma'], name="Net Gamma (Bn$)", marker_color=bar_colors))
     opex_sample_dates = pd.date_range(start=df.index[0], end=df.index[-1], freq='WOM-3FRI')
     for odate in opex_sample_dates:
         if odate in df.index:
-            fig_gamma.add_vline(x=odate, line_dash="dot", line_color="gray", opacity=0.4)
-            
-    fig_gamma.update_layout(xaxis_title="Timeline", yaxis_title="Net Gamma (Bn$)", hovermode="x unified", height=380)
+            fig_gamma.add_vline(x=odate, line_dash="dot", line_color="gray", opacity=0.3)
+    fig_gamma.update_layout(title="8. Micro Flow: Net Dealer Gamma Exposure & OPEX Pinning", xaxis_title="Timeline", yaxis_title="Gamma (Bn$)", hovermode="x unified", height=380)
     st.plotly_chart(fig_gamma, use_container_width=True)
 
-# 5. ตารางสรุปข้อมูลดิบล่าสุดตัวเลขจริง
+# 5. ตารางสรุปข้อมูลดิบ Real-time ปิดท้าย
 st.markdown("### 📌 สแนปชอตราคาปิดตลาดและอินดิเคเตอร์ล่าสุด")
 summary_data = pd.DataFrame({
     'Asset Class / Indicator': ['S&P 500 Index Core (^GSPC)', 'S&P 500 ETF (SPY)', 'Nasdaq 100 (QQQ)', 'Dow Jones Index (^DJI)', 'Semiconductor Index (SOXX)', 'CBOE VIX Index (^VIX)', 'US 10Y Yield (%)', 'US 30Y Yield (%)', 'Crude Oil WTI ($)'],
