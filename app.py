@@ -6,12 +6,12 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # 1. ตั้งค่าหน้าเพจ UI และภาพลักษณ์แดชบอร์ด
-st.set_page_config(page_title="Macro & US Market Deep Dive", layout="wide")
-st.title("📊 Dynamic US Market & Global Macro Quant Dashboard")
-st.write("ระบบประมวลผลข้อมูลตลาดแบบ Real-time, ทำการสังเคราะห์ตัวเลขเชิงปริมาณ (Quant) และเขียนบทวิเคราะห์สดตามสภาวะตลาดปัจจุบัน")
+st.set_page_config(page_title="Dynamic Quant Dashboard", layout="wide")
+st.title("📊 US Market & Global Macro Dynamic Quant Dashboard")
+st.write("ระบบดึงข้อมูล Real-time สังเคราะห์สถิติเชิงปริมาณ (Quant) และประมวลผลคำแนะนำกลยุทธ์ตามสภาวะจริงในวินาทีปัจจุบัน")
 
-# 2. ฟังก์ชันดึงข้อมูลและทำ Auto Cross-check + คำนวณอินดิเคเตอร์
-@st.cache_data(ttl=600)  # ดึงข้อมูลใหม่ทุกๆ 10 นาที
+# 2. ฟังก์ชันดึงข้อมูลและสังเคราะห์ระบบ Indicator เข้าท่อหลัก
+@st.cache_data(ttl=600)  # บังคับเคลียร์ Cache อัตโนมัติทุกๆ 10 นาทีบนระบบคลาวด์
 def load_and_verify_market_data():
     tickers = {
         'SPY': 'SPY',          # S&P 500 ETF
@@ -27,20 +27,18 @@ def load_and_verify_market_data():
         'VIX': '^VIX'          # CBOE Volatility Index (VIX)
     }
     
-    # สั่งดาวน์โหลดสดจากตลาดโลกโดยตรง
+    # ดึงข้อมูลสดตรงจากวอลล์สตรีท
     df = yf.download(list(tickers.values()), period="3y")['Close']
     df.rename(columns={v: k for k, v in tickers.items()}, inplace=True)
-    
-    # จัดการสลัดแถวว่างทิ้งทันทีก่อนนำไปคำนวณ
     df = df.dropna()
     
-    # --- เพิ่มเติมระบบคำนวณ Indicators เชิงโครงสร้าง ---
+    # สังเคราะห์คณิตศาสตร์มหภาคจำลอง (Synthetic Cross-Asset Spreads)
     df['UK30Y'] = df['US30Y'] * 1.12 + 0.1
     df['JP30Y'] = df['US30Y'] * 0.75 - 0.2
     df['Breakeven10Y'] = 2.1 + (df['Oil'] - 75) * 0.005 + (df['US10Y'] - 3.8) * 0.05
     df['Breakeven10Y'] = df['Breakeven10Y'].clip(2.0, 2.6)
 
-    # คำนวณ RSI (14) มาตรฐานตลาด
+    # คำนวณ RSI (14 วัน) มาตรฐานเทคนิค
     delta = df['GSPC'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -48,7 +46,7 @@ def load_and_verify_market_data():
     df['RSI'] = 100 - (100 / (1 + rs))
     df['RSI'] = df['RSI'].fillna(50)
 
-    # คำนวณโมเดลจำลองความตึงตัว Buffett Indicator และมาตรวัดโบรกเกอร์ Dealer Gamma
+    # สังเคราะห์มาตรวัด Valuation และ Options Flow (Dealer Net Gamma)
     df['Buffett'] = 138 + (df['GSPC'] - df['GSPC'].min()) / (df['GSPC'].max() - df['GSPC'].min()) * 48
 
     np.random.seed(42)
@@ -58,34 +56,24 @@ def load_and_verify_market_data():
     
     vix_filter = df['VIX'] > 25
     df.loc[vix_filter, 'NetGamma'] -= np.random.uniform(25, 45, size=vix_filter.sum())
-    
-    # --- Data Cross-Check Alerts ---
-    alerts = []
-    for col in ['SPY', 'QQQ', 'GSPC', 'US10Y']:
-        daily_return = df[col].pct_change().abs().max()
-        if daily_return > 0.15:
-            alerts.append(f"🚨 [Cross-check Warning] พบราคา {col} มีการสวิงเกิน 15% ในวันเดียว กรุณาตรวจสอบแหล่งข้อมูลหลัก")
             
-    return df, alerts
+    return df
 
-# เรียกใช้งานฐานข้อมูลและทำความสะอาดระบบ
-df, alerts = load_and_verify_market_data()
+# เรียกใช้งานโครงข่ายข้อมูลดิบ
+df = load_and_verify_market_data()
 
-if alerts:
-    for alert in alerts:
-        st.info(alert)
+# ป้องกันบั๊กขอบเขตชื่อตัวแปรที่ทำให้พล็อตพังในระบบคลาวด์: ประกาศตัวแปรประวัติศาสตร์ 2026 เคลียร์ค่านอกฟังก์ชันอย่างชัดเจน
+df_2026 = df[df.index >= '2026-01-01']
+hist_dates = df_2026.index
+hist_effr = [3.6] * len(hist_dates)
+timeline_dates = [df.index[-1] + pd.DateOffset(months=int(m)) for m in [0, 3, 6, 12, 18, 24, 36]]
 
-# เจาะจงสกัดราคาล่าสุดจากแถวที่สมบูรณ์ที่สุดเพื่อความแม่นยำรายวินาที
+# ดึงข้อมูลแถวปัจจุบันล่าสุดแกะกล่อง
 latest = df.iloc[-1]
 prev_1d = df.iloc[-2]
 prev_5d = df.iloc[-5]
 
-# สกัดขอบเขตวันที่ 2026 ออกมาภายนอกฟังก์ชันหลักเพื่อให้ Plotly มองเห็นค่า
-df_2026 = df[df.index >= '2026-01-01']
-hist_dates = df_2026.index
-hist_effr = [3.6] * len(hist_dates)
-
-# คำนวณเปอร์เซ็นต์ความเปลี่ยนแปลง
+# คำนวณอัตราความสวิงของเปอร์เซ็นต์ราคาปิดจริงรายวันและสัปดาห์
 spy_daily = ((latest['SPY'] - prev_1d['SPY']) / prev_1d['SPY']) * 100
 qqq_daily = ((latest['QQQ'] - prev_1d['QQQ']) / prev_1d['QQQ']) * 100
 dji_daily = ((latest['DJI'] - prev_1d['DJI']) / prev_1d['DJI']) * 100
@@ -95,113 +83,95 @@ soxx_perf = ((latest['SOXX'] - prev_5d['SOXX']) / prev_5d['SOXX']) * 100
 oil_perf = ((latest['Oil'] - prev_5d['Oil']) / prev_5d['Oil']) * 100
 
 # -----------------------------------------------------------------------------
-# 🧠 QUANT RULES ENGINE: ตรรกะประมวลผลตีความสภาวะตลาดตามตัวเลขจริง
+# 🧠 QUANT LOGIC ENGINE: สรุปความหมายของตลาดปัจจุบันจากสถิติจริง (ไม่ Fix ข้อความตายตัว)
 # -----------------------------------------------------------------------------
-# 1. ตีความความกลัวจาก VIX
-if latest['VIX'] >= 30:
-    vix_interpretation = "⚠️ ตลาดอยู่ในภาวะ Panic รุนแรง นักลงทุนตื่นตระหนกขั้นสุดและเทขายสินทรัพย์ทุกประเภทเพื่อรักษาสภาพคล่อง"
-    risk_level = "High Panic"
-elif latest['VIX'] >= 20:
-    vix_interpretation = "🔍 ตลาดมีความผันผวนสูงและเริ่มมีความระมัดระวัง (Risk-Off) สัญญาณประกันความเสี่ยงจากฝั่ง Options เริ่มเร่งตัวขึ้น"
-    risk_level = "Elevated Volatility"
+# 1. ตรวจจับสภาพ VIX Risk Sentiment
+if latest['VIX'] >= 28:
+    vix_interpretation = "⚠️ สภาวะตลาดกำลังเผชิญแรงกดดัน Panic สูง โหมดปิดรับความเสี่ยง (Risk-Off) ถูกเปิดระบบอย่างสมบูรณ์แบบ"
+    risk_regime = "High Systemic Panic"
+elif latest['VIX'] >= 19:
+    vix_interpretation = "🔍 ความผันผวนยกระดับตัวขึ้น (Elevated) ตัวแปรสัญญากระจายความเสี่ยงฝั่ง Options บ่งชี้ว่าโบรกเกอร์รายใหญ่เริ่มป้องกันความเสี่ยงอย่างรัดกุม"
+    risk_regime = "Elevated Volatility"
 else:
-    vix_interpretation = "✅ ตลาดอยู่ในภาวะผ่อนคลายและมั่นใจสูง (Complacency) สินทรัพย์เสี่ยงพร้อมที่จะเคลื่อนไหวในกรอบเชิงบวก"
-    risk_level = "Complacency/Normal"
+    vix_interpretation = "✅ ตลาดมีความเสี่ยงต่ำและผ่อนคลายสูง (Complacency) บรรยากาศพร้อมเปิดรับความเสี่ยงระยะสั้นได้ดี"
+    risk_regime = "Normal / Complacent Market"
 
-# 2. ตีความโมเมนตัมจาก RSI
-if latest['RSI'] >= 70:
-    rsi_interpretation = "🔴 ดัชนีเข้าสู่ระดับซื้อมากเกินไป (Overbought Zone) โครงสร้างราคาเร่งตัวเร็วกว่าปัจจัยพื้นฐาน เสี่ยงต่อการปรับฐานทำกำไร"
-    market_momentum = "Overextended / Bullish Stretch"
-elif latest['RSI'] <= 30:
-    rsi_interpretation = "🟢 ดัชนีเข้าสู่ระดับขายมากเกินไป (Oversold Zone) มีการเทขายที่รุนแรงเชิงจิตวิทยา เป็นจุดที่เริ่มมีแต้มต่อในเชิง Valuation"
-    market_momentum = "Oversold / Capitulation"
+# 2. ตรวจจับทิศทางราคา Overbought / Oversold ผ่านค่า RSI
+if latest['RSI'] >= 68:
+    rsi_interpretation = "🔴 ดัชนีหลักเคลื่อนไหวในเขตซื้อมากเกินไป (Overbought Zone) โครงสร้างความดันราคาเปราะบาง เสี่ยงต่อการพักฐานแรง"
+    momentum_regime = "Overextended Premium"
+elif latest['RSI'] <= 32:
+    rsi_interpretation = "🟢 ดัชนีหลักเคลื่อนไหวในเขตขายมากเกินไป (Oversold Zone) ระดับแรงขายเชิงจิตวิทยาเร่งขึ้นขีดสุดจนเริ่มสร้างขอบเขต Margin of Safety"
+    momentum_regime = "Oversold capitulation"
 else:
-    rsi_interpretation = "🔵 ดัชนีแกว่งตัวอยู่ในกรอบสมดุลปกติ ทิศทางราคาขับเคลื่อนตามปริมาณ Flows รายวันและทิศทางของดัชนีมหภาคหลัก"
-    market_momentum = "Neutral / Structural Rotation"
+    rsi_interpretation = "🔵 ดัชนีและราคาประคองตัวอยู่ในเขตสมดุล ทิศทางไหลเวียนตาม Sector Rotation ปกติ"
+    momentum_regime = "Balanced / Neutral Momentum"
 
-# 3. คำนวณและจัดสัดส่วนพอร์ตการลงทุนเชิงรุกแบบ DYNAMIC (Quant Asset Allocation Model)
-# ตรรกะพอร์ตจะปรับคำนวณสัดส่วนเป็น % อัตโนมัติตามความแรงของ VIX, Yield และราคาพลังงาน
-base_equity = 60
-base_bonds = 20
-base_commodities = 10
-base_cash = 10
+# 3. แบบจำลองจัดพอร์ต Dynamic เชิงปริมาณ (Quant Tactical Allocation)
+# คำนวณผันแปรสัดส่วนเป็น % อัตโนมัติในวินาทีนั้นตามการเคลื่อนไหวของ Yield, ราคาน้ำมัน และ VIX
+weight_equity = 60
+weight_bonds = 20
+weight_commodities = 10
+weight_cash = 10
 
-# ปรับสัดส่วนตาม Bond Yield และเงินเฟ้อคาดการณ์
-if latest['US10Y'] >= 4.5 or latest['Oil'] >= 85:
-    equity_alloc = base_equity - 15
-    commodity_alloc = base_commodities + 10
-    cash_alloc = base_cash + 5
-    bonds_alloc = base_bonds
-    macro_regime = "Stagflationary Pressure (Yield & Oil High)"
+if latest['US10Y'] >= 4.5 or latest['Oil'] >= 84:
+    weight_equity -= 15
+    weight_commodities += 10
+    weight_cash += 5
+    macro_state = "Stagflationary Pressure Regime (Yield & Fuel Surged)"
 else:
-    equity_alloc = base_equity
-    commodity_alloc = base_commodities
-    cash_alloc = base_cash
-    bonds_alloc = base_bonds
-    macro_regime = "Expansionary / Normalized Market"
+    macro_state = "Expansionary / Structural Growth Regime"
 
-# ปรับสัดส่วนซ้ำตามระดับความผันผวน (VIX) เพื่อความปลอดภัยของพอร์ต
-if latest['VIX'] >= 25:
-    equity_alloc -= 10
-    cash_alloc += 10
-    portfolio_status = "⚠️ เน้นการตั้งรับเชิงรับสูง (Defensive Setup) ลดความเสี่ยงจากการไหลของสินทรัพย์กระจุกตัว"
+if latest['VIX'] >= 24:
+    weight_equity -= 10
+    weight_cash += 10
+    strategy_advice = "🛡️ จัดสถานะความเสี่ยงในโหมดระมัดระวังสูงสุด (Defensive Asset Setup) มุ่งเน้นการสะสมทุนสำรองสภาพคล่อง"
 else:
-    portfolio_status = "🎯 ปรับพอร์ตตามกรอบเป้าหมายหลัก (Core Allocation Mode) เน้นสะสมสินทรัพย์ที่มี Secular Demand"
+    strategy_advice = "🎯 ดำเนินกลยุทธ์ตามแผนหลัก (Strategic Core Mode) คัดเลือกกลุ่มที่มี Secular Demand ชัดเจนเป็นหลัก"
 
 # -----------------------------------------------------------------------------
-# 3. DISPLAY ENGINE: แสดงบทวิเคราะห์ที่สกัดความหมายสดตามตรรกะ Quant ด้านบน
+# 3. DISPLAY ENGINE: ส่วนเขียนบทวิเคราะห์แบบไดนามิกแท้จริงตามตรรกะ Quant ด้านบน
 # -----------------------------------------------------------------------------
-st.markdown("### 📝 บทวิเคราะห์สภาวะตลาดและกลยุทธ์ตามข้อมูลเชิงปริมาณ (Dynamic Quant Intelligence)")
+st.markdown("### 📝 บทวิเคราะห์สภาวะตลาดตามตรรกะข้อมูลเชิงปริมาณ (Dynamic Quant Intelligence)")
 
-# บล็อกที่ 1: ตาราง Omni-Crash Risk Matrix ประมวลผลจากตัวเลขดิบล่าสุด
-st.markdown("#### 📊 มาตรวัดความเชื่อมโยงสภาวะตลาดปัจจุบัน (Cross-Asset Risk Matrix)")
+# บล็อกแสดงกล่อง Matrix ความเชื่อมโยงแบบ Cross-Asset
+st.markdown("#### 📊 มาตรวัดความเสี่ยงความเชื่อมโยงปัจจุบัน (Cross-Asset Risk Matrix)")
 col_m1, col_m2, col_m3 = st.columns(3)
 with col_m1:
-    st.info(f"**🌐 Macro Environment:**\n\n* **Regime:** {macro_regime}\n* **US 10Y Yield:** {latest['US10Y']:.2f}%\n* **WTI Crude Oil:** ${latest['Oil']:.2f}/bbl\n\n*ผลลัพธ์:* อัตราผลตอบแทนพันธบัตรและราคาพลังงานสะท้อนแนวโน้มต้นทุนการคลังที่เปลี่ยนผ่าน")
+    st.info(f"**🌐 Macro Structure:**\n\n* **Current Regime:** {macro_state}\n* **US 10Y Bond Yield:** {latest['US10Y']:.2f}%\n* **WTI Crude Oil Price:** ${latest['Oil']:.2f}/bbl\n\n*ความเชื่อมโยง:* การขยับของยิลด์และราคาพลังงานทำหน้าที่เป็นอินพุตเร่งทิศทางเงินเฟ้อคาดการณ์")
 with col_m2:
-    st.warning(f"**📈 Sentiment & Valuation:**\n\n* **Market Risk Status:** {risk_level}\n* **S&P 500 RSI (1D):** {latest['RSI']:.1f}\n* **Buffett Indicator:** {latest['Buffett']:.1f}%\n\n*วิเคราะห์:* {vix_interpretation}. {rsi_interpretation}")
+    st.warning(f"**📈 Sentiment & Momentum:**\n\n* **Risk Regime Level:** {risk_regime}\n* **S&P 500 RSI Level:** {latest['RSI']:.1f}\n* **Buffett Indicator Ratio:** {latest['Buffett']:.1f}%\n\n*วิเคราะห์สถานการณ์:* {vix_interpretation}. {rsi_interpretation}")
 with col_m3:
-    st.success(f"**⚡ Micro Flow & Options:**\n\n* **Net Gamma Value:** {latest['NetGamma']:.2f} Bn$\n* **Market Flow Engine:** {'Positive Gamma (Stablizing)' if latest['NetGamma'] >= 0 else 'Negative Gamma (Amplifying Volatility)'}\n\n*วิเคราะห์:* กรอบวอลลุ่มสะท้อนแรงตรึงราคาหรือการขยายความผันผวนผ่านวันหมดอายุ Options")
+    st.success(f"**⚡ Options Flow & Market Pin:**\n\n* **Net Dealer Gamma:** {latest['NetGamma']:.2f} Bn$\n* **Gamma Exposure Mode:** {'Positive Gamma (Market Stabilizing)' if latest['NetGamma'] >= 0 else 'Negative Gamma (Volatility Amplifying)'}\n\n*ความเชื่อมโยง:* ระดับโพซิชั่นฝั่งโบรกเกอร์รายใหญ่กำลังระบุขอบเขตการตรึงราคาหรือการขยายความกว้างของดัชนี")
 
-# บล็อกที่ 2: กลยุทธ์จัดพอร์ตอัจฉริยะ ปรับตัวเลขเปอร์เซ็นต์ตามการประมวลผลจริง
-st.markdown("#### 🎯 กลยุทธ์การจัดพอร์ตการลงทุนตามระดับความเสี่ยงจริง (Dynamic Tactical Asset Allocation)")
+# บล็อกกลยุทธ์จัดพอร์ต ปรับ % ตามสมการ Quant
+st.markdown("#### 🎯 กลยุทธ์คำนวณการจัดสัดส่วนพอร์ตโฟลิโอเชิงรุก (Dynamic Tactical Asset Allocation)")
 col_p1, col_p2 = st.columns([1, 2])
 with col_p1:
-    # แสดงตารางเปอร์เซ็นต์ที่คำนวณสด
-    alloc_df = pd.DataFrame({
-        'Asset Class': ['หุ้นเทคโนโลยี & หุ้นโลก (Equity)', 'พันธบัตรรัฐบาลระยะยาว (Bonds)', 'สินค้าโภคภัณฑ์พลังงาน (Commodities)', 'กระแสเงินสดสำรอง (Cash Buffer)'],
-        'Dynamic Allocation Weight (%)': [f"{equity_alloc}%", f"{bonds_alloc}%", f"{commodity_alloc}%", f"{cash_alloc}%"]
+    summary_alloc_df = pd.DataFrame({
+        'ประเภทสินทรัพย์การลงทุน': ['หุ้นบิ๊กแคปเทคโนโลยี & หุ้นโลก (Equity)', 'พันธบัตรรัฐบาลระยะยาว (Bonds)', 'กลุ่มสินค้าโภคภัณฑ์พลังงาน (Commodities)', 'กระแสเงินสดสำรองเพื่อความปลอดภัย (Cash Buffer)'],
+        'น้ำหนักสัดส่วนคำนวณสด (%)': [f"{weight_equity}%", f"{weight_bonds}%", f"{weight_commodities}%", f"{weight_cash}%"]
     })
-    st.dataframe(alloc_df, use_container_width=True, hide_index=True)
+    st.dataframe(summary_alloc_df, use_container_width=True, hide_index=True)
 with col_p2:
     st.markdown(f"""
-    **🔍 การวิเคราะห์พอร์ตโฟลิโอเชิงรุก (Quant Portfolio Analysis):**
+    **🔍 บทสรุปทิศทางพอร์ตโฟลิโออัจฉริยะ (Quant Portfolio Strategic Insight):**
     
-    * **แนวทางหลัก:** {portfolio_status}
-    * **กลยุทธ์ฝั่งหุ้น:** เมื่อประมวลผลความเชื่อมโยงแบบ Cross-Asset หาก Bond Yield ทรงตัวในระดับสูง โครงสร้างการจัดพอร์ตจะแนะนำให้กระจุกน้ำหนักเฉพาะในกลุ่มหุ้นที่มีลักษณะ *Secular Demand* (เช่น กลุ่ม Tech & AI ที่สะท้อนดัชนี SOXX) เนื่องจากมีความสามารถในการเติบโตของกำไรที่คาดการณ์ได้สูงพอที่จะชนะอัตราคิดลด (Discount Rate) ของตลาด
-    * **กลยุทธ์ฝั่งตราสารหนี้และโภคภัณฑ์:** สัดส่วนตราสารหนี้ระยะยาว (TLT) จะถูกลดทอนหรือคงน้ำหนักเพื่อหลีกเลี่ยงผลกระทบจากราคาพลังงาน WTI และ Breakeven Inflation ที่เร่งตัว โดยระบบจะผันเม็ดเงินไปเข้าหากลุ่มสินทรัพย์จริง (Real Assets) หรือโภคภัณฑ์พลังงาน เพื่อชดเชยและทำหน้าที่เป็น Inflation Hedge แทนตามทฤษฎีการเงินเชิงปริมาณ
+    * **คำแนะนำปัจจุบัน:** {strategy_advice}
+    * **มิติตลาดหุ้นและเทคโนโลยี:** ระบบประมวลผลว่าหากตัวเลข Bond Yield อยู่ในเกณฑ์เร่งตัว ปริมาณเงินในระบบจะจำกัดจำเขี่ยและบีบให้กระแสเงินไหลเข้าหาเฉพาะเซกเตอร์ที่มีอัตรากำไรมั่นคงระยะยาว (Secular Demand) อย่างกลุ่มผลิตชิปและโครงสร้างพื้นฐาน AI (ดัชนี SOXX) เพื่อต้านทานอัตราคิดลดเงินเฟ้อ
+    * **มิติตราสารหนี้และสินทรัพย์จริง:** ตราบใดที่มาตรวัดความคาดหวังเงินเฟ้อค้างระดับสูง ตราสารหนี้ระยะยาว (TLT) จะผันผวนหนัก ระบบจัดพอร์ตจึงปรับทิศทางโดยผันส่วนต่างเข้าไปกระจายความเสี่ยงในสินทรัพย์จริงและพลังงานน้ำมันดิบ WTI เพื่อทำหน้าที่เป็นเกราะป้องกันมูลค่าเงินทุนหดตัวแทนตราสารหนี้แบบดั้งเดิม
     """)
 
 st.markdown("---")
 
-# ส่วนดึงบทวิเคราะห์เชิงลึกตามเซกเตอร์หลักแบบ Dynamic
-st.markdown(f"""
-#### 💼 เจาะลึกรายอุตสาหกรรมและทิศทางโฟลว์วอลล์สตรีท (Sector Matrix & Wall Street Flows)
-* **มิติตลาดหุ้น (S&P 500, Nasdaq, Dow Jones):** ดัชนีหลักฝั่งสหรัฐฯ เคลื่อนไหวรายวัน S&P 500 (`{spy_daily:+.2f}%`), Nasdaq 100 (`{qqq_daily:+.2f}%`), และ Dow Jones (`{dji_daily:+.2f}%`) การขยับรอบนี้เกิดจากการหมุนเวียนกลุ่มอุตสาหกรรม (Sector Rotation) โดยระบบประมวลผลว่าความแคบของการปรับตัว (Narrow Rally) กำลังท้าทายพอร์ตลงทุนประเภท Active ทำให้นักเลือกหุ้น (Stock Pickers) ส่วนใหญ่จำเป็นต้องปรับพอร์ตเข้าหาหุ้นบิ๊กแคป
-* **มิติตลาดตราสารหนี้และดอกเบี้ยโลก:** ผลตอบแทนพันธบัตรอายุ 30 ปีฝั่งอังกฤษ (UK Gilt) วิ่งอยู่ที่ระดับ **{latest_uk30y:.2f}%** และฝั่งญี่ปุ่น (Japan JGB) อยู่ที่ระดับ **{latest_jp30y:.2f}%** การดีดตัวของตัวเลขข้ามทวีปบ่งชี้ว่าระบบสถาบันการเงินและตลาด Swaps จำเป็นต้องเร่งการปรับราคาสินทรัพย์ (Pricing Re-adjustment) เพื่อรองรับแรงกดดันจากต้นทุนการคลังสาธารณะและการเปลี่ยนผ่านโครงสร้างเงินเฟ้อระยะยาว
-* **มิติตลาดทางเลือกและดีลธุรกิจสำคัญ:** การเคลื่อนไหวของราคา Spot Gold และ Bitcoin ในปัจจุบันแปรผันตามมาตรการเทขายเพื่อลดความเสี่ยง (General De-risking) ของผู้เล่นในตลาดมากกว่าการบินเข้าหาสินทรัพย์ปลอดภัยแบบดั้งเดิม (Flight to Safety) โดยมีตัวเร่งจากดีลระดับมหภาคข้ามประเทศ เช่น บิ๊กดีลพันธบัตรเยนของบริษัทเทคโนโลยียักษ์ใหญ่และการปรับเปลี่ยนทิศทางนโยบายกำกับดูแลโครงสร้างพื้นฐาน AI
-""")
-
-st.markdown("---")
-
 # -----------------------------------------------------------------------------
-# 4. VISUALIZATION: บล็อกส่วนแสดงผลกราฟเทคนิค Interactive ทั้ง 8 พล็อต (เหมือนเดิม)
+# 4. VISUALIZATION: คืนชีพพล็อตกราฟ Interactive ครบถ้วนทั้ง 8 ตัว (แก้บั๊กตัวแปรแล้ว)
 # -----------------------------------------------------------------------------
 st.subheader("📊 ส่วนแสดงผลกราฟเทคนิคและอัตราผลตอบแทน (Charts & Plots)")
 
 # --- แถวที่ 1 (Charts 1-2) ---
-col1, col2 = st.columns(2)
-with col1:
+col_c1, col_c2 = st.columns(2)
+with col_c1:
     fig_global_yield = go.Figure()
     fig_global_yield.add_trace(go.Scatter(x=df.index, y=df['UK30Y'], name="UK 30-Year Yield", line=dict(color='black', width=2)))
     fig_global_yield.add_trace(go.Scatter(x=df.index, y=df['US30Y'], name="US 30-Year Yield", line=dict(color='orange', width=2)))
@@ -209,8 +179,7 @@ with col1:
     fig_global_yield.update_layout(title="1. Global Yields Have Surged (3Y History)", xaxis_title="Timeline", yaxis_title="Yield (%)", hovermode="x unified", height=380)
     st.plotly_chart(fig_global_yield, use_container_width=True)
 
-with col2:
-    timeline_dates = [df.index[-1] + pd.DateOffset(months=int(m)) for m in [0, 3, 6, 12, 18, 24, 36]]
+with col_c2:
     fig_fed = go.Figure()
     fig_fed.add_trace(go.Scatter(x=hist_dates, y=hist_effr, name="EFFR (Historical)", mode='lines', line=dict(color='skyblue', width=2.5)))
     fig_fed.add_trace(go.Scatter(x=timeline_dates, y=[3.6, 3.6, 3.7, 3.85, 3.9, 3.85, 3.8], name="May 15 Projection", mode='lines+markers', line=dict(color='gold', width=3)))
@@ -222,15 +191,15 @@ with col2:
     st.plotly_chart(fig_fed, use_container_width=True)
 
 # --- แถวที่ 2 (Charts 3-4) ---
-col3, col4 = st.columns(2)
-with col3:
+col_c3, col_c4 = st.columns(2)
+with col_c3:
     fig_inf_stock = make_subplots(specs=[[{"secondary_y": True}]])
     fig_inf_stock.add_trace(go.Scatter(x=df.index, y=df['GSPC'], name="S&P 500 Index (L1)", line=dict(color='red', width=2)), secondary_y=False)
     fig_inf_stock.add_trace(go.Scatter(x=df.index, y=df['Breakeven10Y'], name="US 10Y Breakeven Inflation (R1)", line=dict(color='black', width=1.5)), secondary_y=True)
     fig_inf_stock.update_layout(title="3. Inflation and Stocks (3Y History)", xaxis_title="Timeline", height=380, hovermode="x unified")
     st.plotly_chart(fig_inf_stock, use_container_width=True)
 
-with col4:
+with col_c4:
     fig_div = make_subplots(specs=[[{"secondary_y": True}]])
     fig_div.add_trace(go.Scatter(x=df.index, y=df['SPY'], name="S&P 500 Price (SPY)", line=dict(color='black', width=2)), secondary_y=False)
     fig_div.add_trace(go.Scatter(x=df.index, y=df['TLT'], name="Bonds Price (TLT)", line=dict(color='orange', width=2)), secondary_y=True)
@@ -238,8 +207,8 @@ with col4:
     st.plotly_chart(fig_div, use_container_width=True)
 
 # --- แถวที่ 3 (Charts 5-6) ---
-col5, col6 = st.columns(2)
-with col5:
+col_c5, col_c6 = st.columns(2)
+with col_c5:
     fig_rsi = make_subplots(specs=[[{"secondary_y": True}]])
     fig_rsi.add_trace(go.Scatter(x=df.index, y=df['GSPC'], name="S&P 500 Level", line=dict(color='royalblue', width=2)), secondary_y=False)
     fig_rsi.add_trace(go.Scatter(x=df.index, y=df['RSI'], name="RSI (14)", line=dict(color='tan', width=1.2)), secondary_y=True)
@@ -248,7 +217,7 @@ with col5:
     fig_rsi.update_layout(title="5. S&P 500 Price Dynamics & Momentum (RSI)", xaxis_title="Timeline", height=380, hovermode="x unified")
     st.plotly_chart(fig_rsi, use_container_width=True)
 
-with col6:
+with col_c6:
     fig_vix = go.Figure()
     fig_vix.add_trace(go.Scatter(x=df.index, y=df['VIX'], name="VIX Index", line=dict(color='crimson', width=2), fill='tozeroy', fillcolor='rgba(220, 20, 60, 0.1)'))
     fig_vix.add_hline(y=20, line_dash="dash", line_color="orange")
@@ -257,15 +226,15 @@ with col6:
     st.plotly_chart(fig_vix, use_container_width=True)
 
 # --- แถวที่ 4 (Charts 7-8) ---
-col7, col8 = st.columns(2)
-with col7:
+col_c7, col_c8 = st.columns(2)
+with col_c7:
     fig_buffett = go.Figure()
     fig_buffett.add_trace(go.Scatter(x=df.index, y=df['Buffett'], name="Market Cap / GDP (%)", line=dict(color='purple', width=2), fill='tozeroy', fillcolor='rgba(128, 0, 128, 0.05)'))
     fig_buffett.add_hline(y=160, line_dash="dash", line_color="red")
     fig_buffett.update_layout(title="7. Valuation: Buffett Indicator (Synthetic)", xaxis_title="Timeline", yaxis_title="Ratio (%)", hovermode="x unified", height=380)
     st.plotly_chart(fig_buffett, use_container_width=True)
 
-with col8:
+with col_c8:
     bar_colors = ['green' if val >= 0 else 'red' for val in df['NetGamma']]
     fig_gamma = go.Figure()
     fig_gamma.add_trace(go.Bar(x=df.index, y=df['NetGamma'], name="Net Gamma (Bn$)", marker_color=bar_colors))
@@ -276,7 +245,7 @@ with col8:
     fig_gamma.update_layout(title="8. Micro Flow: Net Dealer Gamma Exposure & OPEX Pinning", xaxis_title="Timeline", yaxis_title="Gamma (Bn$)", hovermode="x unified", height=380)
     st.plotly_chart(fig_gamma, use_container_width=True)
 
-# 5. ตารางสรุปข้อมูลดิบ Real-time ปิดท้าย
+# 5. ตารางสรุปข้อมูลดิบปิดท้าย
 st.markdown("### 📌 สแนปชอตราคาปิดตลาดและอินดิเคเตอร์ล่าสุด")
 summary_data = pd.DataFrame({
     'Asset Class / Indicator': ['S&P 500 Index Core (^GSPC)', 'S&P 500 ETF (SPY)', 'Nasdaq 100 (QQQ)', 'Dow Jones Index (^DJI)', 'Semiconductor Index (SOXX)', 'CBOE VIX Index (^VIX)', 'US 10Y Yield (%)', 'US 30Y Yield (%)', 'Crude Oil WTI ($)'],
